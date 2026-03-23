@@ -1,6 +1,6 @@
 # Pidro FM Bot
 
-Bot do Telegram para buscar músicas na Deezer e compartilhar resultados no chat ou no modo inline.
+Bot do Telegram para buscar músicas na Deezer e compartilhar resultados no chat ou no modo inline, agora com trecho relevante da letra via Genius.
 
 ## Funcionalidades
 
@@ -37,6 +37,7 @@ Variáveis:
 - `WEBHOOK_URL`: URL pública para webhook (opcional)
 - `WEBHOOK_SECRET`: segredo do webhook (opcional)
 - `PORT`: porta da aplicação (padrão `8443`)
+- `GENIUS_ACCESS_TOKEN`: token da API do Genius para buscar trecho relevante da letra
 
 ## Execução local
 
