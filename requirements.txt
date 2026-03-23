@@ -1,8 +1,5 @@
-python-telegram-bot[job-queue]==20.7
+python-telegram-bot==20.7
 requests
-feedparser
 beautifulsoup4
+openai
 lxml
-openai>=1.0.0
-python-dotenv
-aiohttp
