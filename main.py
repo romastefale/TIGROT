@@ -1,11 +1,9 @@
 import os
 import uuid
-import asyncio
 import hashlib
 import requests
 from bs4 import BeautifulSoup
 import logging
-from aiohttp import web
 
 from telegram import (
     Update,
@@ -16,28 +14,43 @@ from telegram import (
 )
 
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     InlineQueryHandler,
     ContextTypes
 )
-from telegram.error import Conflict, NetworkError
 
 from openai import OpenAI
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 GENIUS_API_KEY = os.getenv("GENIUS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
+
+try:
+    PORT = int(os.getenv("PORT", 8443))
+except ValueError:
+    logger.warning("PORT inválido, usando 8443")
+    PORT = 8443
+
+if not TOKEN:
+    raise ValueError("Configure TELEGRAM_TOKEN nas variáveis de ambiente")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 music_cache: dict[str, dict] = {}
+
+# =========================
+# CACHE DE MÚSICAS
+# =========================
 
 def make_key(data: dict) -> str:
     raw = f"{data['title']}|{data['artist']}|{data['url']}"
@@ -90,9 +103,7 @@ def pegar_letra(url):
         r = requests.get(url, timeout=10)
         soup = BeautifulSoup(r.text, "lxml")
         divs = soup.find_all("div", {"data-lyrics-container": "true"})
-        letras = []
-        for d in divs:
-            letras.append(d.get_text("\n"))
+        letras = [d.get_text("\n") for d in divs]
         texto = "\n".join(letras).strip()
         return texto if texto else None
     except Exception as e:
@@ -166,6 +177,7 @@ async def music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🎵 Escolha:", reply_markup=InlineKeyboardMarkup(kb))
 
+
 async def selecionar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -174,7 +186,7 @@ async def selecionar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = get_music(key)
 
     if not m:
-        await q.message.reply_text("❌ Dados expirados, tente novamente com /music")
+        await q.message.reply_text("❌ Dados expirados, use /music novamente")
         return
 
     kb = InlineKeyboardMarkup([[
@@ -184,16 +196,16 @@ async def selecionar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await q.message.reply_text("♪ Lyrics?", reply_markup=kb)
 
+
 async def final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    parts = q.data.split("|", 1)
-    tipo, key = parts[0], parts[1]
-
+    tipo, key = q.data.split("|", 1)
     m = get_music(key)
+
     if not m:
-        await q.message.reply_text("❌ Dados expirados, tente novamente com /music")
+        await q.message.reply_text("❌ Dados expirados, use /music novamente")
         return
 
     if tipo == "n":
@@ -206,6 +218,7 @@ async def final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     refrao = extrair_refrao(letra)
 
     await q.message.reply_text(msg_letra(m, refrao), parse_mode="Markdown")
+
 
 async def inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.inline_query.query
@@ -229,68 +242,35 @@ async def inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.inline_query.answer(res, cache_time=1)
 
 # =========================
-# ERROR HANDLER
-# =========================
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    err = context.error
-    if isinstance(err, Conflict):
-        logger.warning("Conflito detectado (outra instância rodando). Aguardando 5s...")
-        await asyncio.sleep(5)
-    elif isinstance(err, NetworkError):
-        logger.warning(f"Erro de rede: {err}. Tentando novamente...")
-    else:
-        logger.error(f"Erro não tratado: {err}", exc_info=err)
-
-# =========================
 # MAIN
 # =========================
 
 def main():
-    if not TELEGRAM_TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN não definido")
-
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
 
     app.add_handler(CommandHandler("music", music))
     app.add_handler(CallbackQueryHandler(selecionar, pattern=r"^s\|"))
     app.add_handler(CallbackQueryHandler(final, pattern=r"^(y|n)\|"))
     app.add_handler(InlineQueryHandler(inline))
-    app.add_error_handler(error_handler)
 
     if WEBHOOK_URL:
-        logger.info(f"Iniciando em modo WEBHOOK na porta {PORT}")
-
-        async def on_startup(aioapp: web.Application):
-            await app.initialize()
-            await app.bot.set_webhook(
-                url=f"{WEBHOOK_URL.rstrip('/')}/webhook/{TELEGRAM_TOKEN}",
-                allowed_updates=Update.ALL_TYPES
-            )
-            await app.start()
-
-        async def on_shutdown(aioapp: web.Application):
-            await app.stop()
-            await app.shutdown()
-
-        async def webhook_handler(request: web.Request):
-            data = await request.json()
-            update = Update.de_json(data, app.bot)
-            await app.process_update(update)
-            return web.Response(text="ok")
-
-        aioapp = web.Application()
-        aioapp.router.add_post(f"/webhook/{TELEGRAM_TOKEN}", webhook_handler)
-        aioapp.on_startup.append(on_startup)
-        aioapp.on_shutdown.append(on_shutdown)
-
-        web.run_app(aioapp, host="0.0.0.0", port=PORT)
-    else:
-        logger.info("Iniciando em modo POLLING (sem WEBHOOK_URL definida)")
-        app.run_polling(
+        logger.info(f"Iniciando em modo WEBHOOK — porta {PORT}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+            secret_token=WEBHOOK_SECRET,
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query", "inline_query"],
         )
+    else:
+        logger.info("Iniciando em modo POLLING")
+        app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
