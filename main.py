@@ -1,13 +1,28 @@
 import os
-import re
+import uuid
 import requests
 from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineQueryResultArticle,
+    InputTextMessageContent
+)
+
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    InlineQueryHandler,
+    ContextTypes
+)
+
 from openai import OpenAI
 
 # =========================
-# CONFIG
+# ENV
 # =========================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -16,18 +31,14 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN não definido")
-if not GENIUS_API_KEY:
-    raise ValueError("GENIUS_API_KEY não definido")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY não definido")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
-# GENIUS SEARCH
+# GENIUS
 # =========================
 
-def buscar_musica(query):
+def buscar_varias_musicas(query):
     url = "https://api.genius.com/search"
     headers = {"Authorization": f"Bearer {GENIUS_API_KEY}"}
     params = {"q": query}
@@ -36,124 +47,205 @@ def buscar_musica(query):
     data = r.json()
 
     hits = data.get("response", {}).get("hits", [])
-    if not hits:
-        return None
 
-    song = hits[0]["result"]
-    return {
-        "title": song["title"],
-        "artist": song["primary_artist"]["name"],
-        "url": song["url"]
-    }
+    resultados = []
+
+    for hit in hits[:5]:
+        song = hit["result"]
+
+        resultados.append({
+            "title": song["title"],
+            "artist": song["primary_artist"]["name"],
+            "album": song.get("album", {}).get("name", "Single"),
+            "url": song["url"],
+            "thumb": song.get("song_art_image_thumbnail_url")
+        })
+
+    return resultados
 
 # =========================
-# SCRAPING LETRA
+# SCRAPING
 # =========================
 
 def pegar_letra(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+    headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "lxml")
 
-    lyrics_divs = soup.find_all("div", {"data-lyrics-container": "true"})
+    soup = BeautifulSoup(r.text, "lxml")
+    divs = soup.find_all("div", {"data-lyrics-container": "true"})
 
     letra = []
-    for div in lyrics_divs:
-        texto = div.get_text(separator="\n")
-        letra.append(texto)
+    for d in divs:
+        letra.append(d.get_text("\n"))
 
     return "\n".join(letra).strip()
 
 # =========================
-# OPENAI - EXTRAIR REFRÃO
+# OPENAI
 # =========================
 
 def extrair_refrao(letra):
     try:
-        prompt = f"""
-Extraia APENAS o refrão principal da música abaixo.
-
-- Retorne SOMENTE o refrão
-- Sem explicações
-- Sem colchetes tipo [Chorus]
-- Máximo 8 linhas
-
-Letra:
-{letra}
-"""
-
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{
+                "role": "user",
+                "content": f"Extraia apenas o refrão principal da música abaixo (máx 8 linhas):\n\n{letra}"
+            }],
             temperature=0.3
         )
-
         return resp.choices[0].message.content.strip()
-
-    except Exception as e:
-        print("Erro OpenAI:", e)
+    except:
         return None
 
 # =========================
-# COMANDO /lyrics
+# FORMAT
 # =========================
 
-async def lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def formatar_letra_codigo(refrao):
+    refrao = refrao.replace("```", "'''")
+    linhas = [l.strip() for l in refrao.split("\n") if l.strip()]
+    return "```\n" + "\n".join(linhas) + "\n```"
+
+def montar_msg_musica(m):
+    return (
+        f"♬ *{m['title']}*\n"
+        f"▶ _{m['album']}_\n"
+        f"★ _{m['artist']}_"
+    )
+
+def montar_msg_com_letra(m, refrao):
+    return (
+        f"♬ *{m['title']}*\n"
+        f"▶ _{m['album']}_\n"
+        f"★ _{m['artist']}_\n\n"
+        f"_♪ ♫ Lyrics:_\n\n"
+        f"{formatar_letra_codigo(refrao)}"
+    )
+
+# =========================
+# CHAT FLOW
+# =========================
+
+async def music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Use: /lyrics nome da música")
+        await update.message.reply_text("Digite o nome da música")
         return
 
     query = " ".join(context.args)
+    musicas = buscar_varias_musicas(query)
 
-    await update.message.reply_text("🔎 Buscando música...")
-
-    musica = buscar_musica(query)
-
-    if not musica:
-        await update.message.reply_text("❌ Música não encontrada.")
-        return
-
-    letra = pegar_letra(musica["url"])
-
-    if not letra:
-        await update.message.reply_text("❌ Não consegui obter a letra.")
-        return
-
-    refrao = extrair_refrao(letra)
-
-    if not refrao:
-        await update.message.reply_text("❌ Não consegui extrair o refrão.")
-        return
-
-    # Formatação estilo citação Telegram
-    refrao_formatado = "\n".join([f"> {linha}" for linha in refrao.split("\n") if linha.strip()])
-
-    mensagem = (
-        f"🎵 *{musica['title']}*\n"
-        f"👤 _{musica['artist']}_\n\n"
-        f"{refrao_formatado}"
-    )
+    keyboard = []
+    for m in musicas:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{m['title']} — {m['artist']}",
+                callback_data=f"select|{m['url']}|{m['title']}|{m['artist']}|{m['album']}"
+            )
+        ])
 
     await update.message.reply_text(
-        mensagem,
+        "🎵 Escolha a música:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def selecionar_musica(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    _, url, title, artist, album = q.data.split("|")
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✓ Yes", callback_data=f"yes|{url}|{title}|{artist}|{album}"),
+            InlineKeyboardButton("✕ No", callback_data=f"no|{url}|{title}|{artist}|{album}")
+        ]
+    ])
+
+    await q.message.reply_text("♪ Lyrics?", reply_markup=keyboard)
+
+async def resposta_final(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    tipo, url, title, artist, album = q.data.split("|")
+
+    musica = {
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "url": url
+    }
+
+    if tipo == "no":
+        await q.message.reply_text(montar_msg_musica(musica), parse_mode="Markdown")
+        return
+
+    await q.message.reply_text("🎧 Buscando refrão...")
+    letra = pegar_letra(url)
+    refrao = extrair_refrao(letra)
+
+    await q.message.reply_text(
+        montar_msg_com_letra(musica, refrao),
         parse_mode="Markdown"
     )
+
+# =========================
+# INLINE
+# =========================
+
+async def inline_query(update, context):
+    query = update.inline_query.query
+    if not query:
+        return
+
+    musicas = buscar_varias_musicas(query)
+    results = []
+
+    for m in musicas:
+        # normal
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title=f"{m['title']} — {m['artist']}",
+                description=m['album'],
+                thumbnail_url=m["thumb"],
+                input_message_content=InputTextMessageContent(
+                    montar_msg_musica(m),
+                    parse_mode="Markdown"
+                )
+            )
+        )
+
+        # com lyrics
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title=f"{m['title']} — {m['artist']} ♪ ♫ Lyrics",
+                description="Com refrão",
+                thumbnail_url=m["thumb"],
+                input_message_content=InputTextMessageContent(
+                    montar_msg_com_letra(m, "Carregando..."),
+                    parse_mode="Markdown"
+                )
+            )
+        )
+
+    await update.inline_query.answer(results, cache_time=1)
 
 # =========================
 # MAIN
 # =========================
 
 def main():
-    print("🚀 BOT INICIANDO...")
+    print("🚀 BOT ONLINE")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("lyrics", lyrics))
+    app.add_handler(CommandHandler("music", music))
+    app.add_handler(CallbackQueryHandler(selecionar_musica, pattern="^select"))
+    app.add_handler(CallbackQueryHandler(resposta_final, pattern="^(yes|no)"))
+    app.add_handler(InlineQueryHandler(inline_query))
 
     app.run_polling()
 
