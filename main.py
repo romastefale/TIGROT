@@ -2,132 +2,160 @@ import os
 import re
 import requests
 from bs4 import BeautifulSoup
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from openai import OpenAI
 
+# =========================
+# CONFIG
+# =========================
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GENIUS_API_KEY = os.getenv("GENIUS_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-HEADERS = {
-    "Authorization": f"Bearer {GENIUS_API_KEY}"
-}
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN não definido")
+if not GENIUS_API_KEY:
+    raise ValueError("GENIUS_API_KEY não definido")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY não definido")
 
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==============================
-# 🔎 BUSCAR MÚSICA NO GENIUS
-# ==============================
-def search_song_on_genius(query):
+# =========================
+# GENIUS SEARCH
+# =========================
+
+def buscar_musica(query):
     url = "https://api.genius.com/search"
+    headers = {"Authorization": f"Bearer {GENIUS_API_KEY}"}
     params = {"q": query}
 
-    res = requests.get(url, headers=HEADERS, params=params)
+    r = requests.get(url, headers=headers, params=params)
+    data = r.json()
 
-    if res.status_code != 200:
-        return None
-
-    data = res.json()
     hits = data.get("response", {}).get("hits", [])
-
     if not hits:
         return None
 
-    return hits[0]["result"]["url"]
+    song = hits[0]["result"]
+    return {
+        "title": song["title"],
+        "artist": song["primary_artist"]["name"],
+        "url": song["url"]
+    }
 
+# =========================
+# SCRAPING LETRA
+# =========================
 
-# ==============================
-# 📄 EXTRAIR LETRA DA PÁGINA
-# ==============================
-def scrape_lyrics(song_url):
+def pegar_letra(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "lxml")
+
+    lyrics_divs = soup.find_all("div", {"data-lyrics-container": "true"})
+
+    letra = []
+    for div in lyrics_divs:
+        texto = div.get_text(separator="\n")
+        letra.append(texto)
+
+    return "\n".join(letra).strip()
+
+# =========================
+# OPENAI - EXTRAIR REFRÃO
+# =========================
+
+def extrair_refrao(letra):
     try:
-        page = requests.get(song_url)
-        soup = BeautifulSoup(page.text, "html.parser")
+        prompt = f"""
+Extraia APENAS o refrão principal da música abaixo.
 
-        lyrics_divs = soup.find_all("div", {"data-lyrics-container": "true"})
+- Retorne SOMENTE o refrão
+- Sem explicações
+- Sem colchetes tipo [Chorus]
+- Máximo 8 linhas
 
-        lyrics = "\n".join([div.get_text(separator="\n") for div in lyrics_divs])
+Letra:
+{letra}
+"""
 
-        return lyrics.strip()
-    except:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
+        )
+
+        return resp.choices[0].message.content.strip()
+
+    except Exception as e:
+        print("Erro OpenAI:", e)
         return None
 
+# =========================
+# COMANDO /lyrics
+# =========================
 
-# ==============================
-# 🎯 EXTRAIR REFRÃO (INTELIGENTE)
-# ==============================
-def extract_chorus(lyrics: str) -> str:
-    if not lyrics:
-        return None
+async def lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Use: /lyrics nome da música")
+        return
 
-    text = lyrics.replace("\r", "").strip()
+    query = " ".join(context.args)
 
-    # 1. PRIORIDADE: [Chorus] ou [Refrain]
-    pattern = re.compile(
-        r"\[(Chorus|Refrain).*?\](.*?)\n(?=\[|$)",
-        re.IGNORECASE | re.DOTALL
+    await update.message.reply_text("🔎 Buscando música...")
+
+    musica = buscar_musica(query)
+
+    if not musica:
+        await update.message.reply_text("❌ Música não encontrada.")
+        return
+
+    letra = pegar_letra(musica["url"])
+
+    if not letra:
+        await update.message.reply_text("❌ Não consegui obter a letra.")
+        return
+
+    refrao = extrair_refrao(letra)
+
+    if not refrao:
+        await update.message.reply_text("❌ Não consegui extrair o refrão.")
+        return
+
+    # Formatação estilo citação Telegram
+    refrao_formatado = "\n".join([f"> {linha}" for linha in refrao.split("\n") if linha.strip()])
+
+    mensagem = (
+        f"🎵 *{musica['title']}*\n"
+        f"👤 _{musica['artist']}_\n\n"
+        f"{refrao_formatado}"
     )
 
-    matches = pattern.findall(text)
+    await update.message.reply_text(
+        mensagem,
+        parse_mode="Markdown"
+    )
 
-    if matches:
-        chorus = matches[0][1].strip()
-        if len(chorus) > 20:
-            return chorus
+# =========================
+# MAIN
+# =========================
 
-    # 2. FALLBACK: bloco mais repetido
-    parts = [
-        p.strip() for p in text.split("\n\n")
-        if len(p.strip()) > 30
-    ]
+def main():
+    print("🚀 BOT INICIANDO...")
 
-    freq = {}
-    for p in parts:
-        freq[p] = freq.get(p, 0) + 1
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    repeated = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    app.add_handler(CommandHandler("lyrics", lyrics))
 
-    if repeated and repeated[0][1] > 1:
-        return repeated[0][0]
+    app.run_polling()
 
-    # 3. FALLBACK FINAL: início da música
-    return parts[0] if parts else None
-
-
-# ==============================
-# 💬 FORMATAR COMO QUOTE TELEGRAM
-# ==============================
-def format_telegram_quote(text: str) -> str:
-    lines = text.split("\n")
-    quoted = "\n".join([f"> {line}" for line in lines])
-    return quoted
-
-
-# ==============================
-# 🎵 FUNÇÃO PRINCIPAL
-# ==============================
-def get_song_chorus(query):
-    url = search_song_on_genius(query)
-
-    if not url:
-        return "❌ Música não encontrada."
-
-    lyrics = scrape_lyrics(url)
-
-    if not lyrics:
-        return "❌ Não consegui obter a letra."
-
-    chorus = extract_chorus(lyrics)
-
-    if not chorus:
-        return "❌ Não encontrei o refrão."
-
-    # Limite seguro Telegram
-    chorus = chorus[:1200]
-
-    return format_telegram_quote(chorus)
-
-
-# ==============================
-# 🔧 TESTE LOCAL (OPCIONAL)
-# ==============================
 if __name__ == "__main__":
-    musica = input("Digite música: ")
-    resultado = get_song_chorus(musica)
-    print("\n")
-    print(resultado)
+    main()
