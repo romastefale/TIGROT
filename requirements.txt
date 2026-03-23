@@ -3,6 +3,6 @@ requests
 feedparser
 beautifulsoup4
 lxml
-openai
+openai>=1.0.0
 python-dotenv
 aiohttp
