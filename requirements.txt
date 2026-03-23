@@ -1,5 +1,5 @@
 python-telegram-bot==20.7
-requests
-beautifulsoup4
-openai
-lxml
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+openai==1.30.1
