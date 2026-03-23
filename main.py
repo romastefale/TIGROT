@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 import hashlib
 import requests
 from bs4 import BeautifulSoup
@@ -21,6 +22,7 @@ from telegram.ext import (
     InlineQueryHandler,
     ContextTypes
 )
+from telegram.error import Conflict, NetworkError
 
 from openai import OpenAI
 
@@ -227,6 +229,20 @@ async def inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.inline_query.answer(res, cache_time=1)
 
 # =========================
+# ERROR HANDLER
+# =========================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.warning("Conflito detectado (outra instância rodando). Aguardando 5s...")
+        await asyncio.sleep(5)
+    elif isinstance(err, NetworkError):
+        logger.warning(f"Erro de rede: {err}. Tentando novamente...")
+    else:
+        logger.error(f"Erro não tratado: {err}", exc_info=err)
+
+# =========================
 # MAIN
 # =========================
 
@@ -240,6 +256,7 @@ def main():
     app.add_handler(CallbackQueryHandler(selecionar, pattern=r"^s\|"))
     app.add_handler(CallbackQueryHandler(final, pattern=r"^(y|n)\|"))
     app.add_handler(InlineQueryHandler(inline))
+    app.add_error_handler(error_handler)
 
     if WEBHOOK_URL:
         logger.info(f"Iniciando em modo WEBHOOK na porta {PORT}")
@@ -270,7 +287,10 @@ def main():
         web.run_app(aioapp, host="0.0.0.0", port=PORT)
     else:
         logger.info("Iniciando em modo POLLING (sem WEBHOOK_URL definida)")
-        app.run_polling()
+        app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "inline_query"],
+        )
 
 if __name__ == "__main__":
     main()
