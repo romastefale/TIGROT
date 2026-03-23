@@ -18,6 +18,7 @@ from telegram import (
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     InlineQueryHandler,
     MessageHandler,
@@ -162,6 +163,17 @@ def build_track_keyboard(tracks: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def build_lyrics_prompt_keyboard(index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Yes", callback_data=f"lyrics_yes_{index}"),
+                InlineKeyboardButton("No", callback_data=f"lyrics_no_{index}"),
+            ]
+        ]
+    )
+
+
 def build_caption(
     user_name: str,
     title: str,
@@ -184,7 +196,7 @@ def build_photo_caption(
 ) -> str:
     caption = f"♫ {user_name} is listening to...\n\n♬ *{title}* - _{album} — {artist}_"
     if lyrics_snippet:
-        caption += f"\n\n🎤 {lyrics_snippet}"
+        caption += f"\n\n_♪ Lyrics\n\n{lyrics_snippet}_"
     return caption
 
 
@@ -427,6 +439,15 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # CHAT
 # =========================
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    await update.message.reply_text(
+        "Esse bot foi criado pelo @tigrao para você compartilhar suas músicas ouvidas onde quiser. Basta digitar aqui, buscar e compartilhar ou citar numa conversa e enviar!"
+    )
+
+
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -474,23 +495,27 @@ async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    index = int(query.data.split("_")[1])
+async def send_selected_track(
+    callback_query,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
+    include_lyrics: bool,
+):
     track = context.user_data["tracks"][index]
-    search_query = context.user_data.get("query", track["title"])
-    lyrics_snippet = await get_lyrics_snippet(
-        track["title"],
-        track["artist"]["name"],
-        search_query,
-    )
+    lyrics_snippet = None
 
-    await query.message.reply_photo(
+    if include_lyrics:
+        search_query = context.user_data.get("query", track["title"])
+        lyrics_snippet = await get_lyrics_snippet(
+            track["title"],
+            track["artist"]["name"],
+            search_query,
+        )
+
+    await callback_query.message.reply_photo(
         photo=track["album"]["cover_big"],
         caption=build_photo_caption(
-            escape_markdown(query.from_user.first_name),
+            escape_markdown(callback_query.from_user.first_name),
             escape_markdown(track["title"]),
             escape_markdown(track["album"]["title"]),
             escape_markdown(track["artist"]["name"]),
@@ -500,6 +525,31 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    index = int(query.data.split("_")[1])
+    await query.message.reply_text(
+        "♪ Lyrics?",
+        reply_markup=build_lyrics_prompt_keyboard(index),
+    )
+
+
+async def handle_lyrics_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    matched = re.match(r"^lyrics_(yes|no)_(\d+)$", query.data)
+    if not matched:
+        return
+
+    include_lyrics = matched.group(1) == "yes"
+    index = int(matched.group(2))
+
+    await send_selected_track(query, context, index, include_lyrics)
+
+
 # =========================
 # MAIN
 # =========================
@@ -507,9 +557,11 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
     app.add_handler(CallbackQueryHandler(more_results, pattern="^more$"))
+    app.add_handler(CallbackQueryHandler(handle_lyrics_choice, pattern=r"^lyrics_(yes|no)_\d+$"))
     app.add_handler(CallbackQueryHandler(select_track, pattern=r"^track_\d+$"))
 
     if WEBHOOK_URL:

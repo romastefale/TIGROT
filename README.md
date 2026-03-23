@@ -6,6 +6,8 @@ Bot do Telegram para buscar músicas na Deezer e compartilhar resultados no chat
 
 - Busca por texto no chat
 - Busca inline no Telegram
+- Comando `/start` com instruções de uso
+- Confirmação `♪ Lyrics?` antes de enviar a música no chat
 - Paginação com botão `Load more`
 - Envio de capa do álbum com legenda formatada
 - Suporte a `polling` e `webhook`
