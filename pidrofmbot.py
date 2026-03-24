@@ -138,13 +138,12 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
 # =========================
 # Lógica de Letras (Gemini)
 # =========================
-def get_chorus_via_gemini(title: str, artist: str, album: str, gemini_key: str | None) -> str:
+async def get_chorus_via_gemini(title: str, artist: str, album: str, gemini_key: str | None) -> str:
     if not gemini_key:
-        return "❌ Erro: GEMINI_API_KEY não configurada."
+        return "❌ Erro: GEMINI_API_KEY não configurada no Railway."
     
     try:
         genai.configure(api_key=gemini_key)
-        # Usando o modelo flash que é super rápido e inteligente
         model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = (
@@ -152,11 +151,26 @@ def get_chorus_via_gemini(title: str, artist: str, album: str, gemini_key: str |
             "Retorne APENAS as linhas da letra do refrão. Sem aspas, sem introdução, sem títulos."
         )
         
-        resp = model.generate_content(prompt)
-        return resp.text.strip() if resp.text else "⚠️ Erro ao extrair o refrão."
+        # Desligando os filtros de segurança que bloqueiam letras de músicas com gírias/palavrões
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        
+        # Usando a versão assíncrona nativa da API
+        resp = await model.generate_content_async(prompt, safety_settings=safety_settings)
+        
+        if hasattr(resp, 'text') and resp.text:
+            return resp.text.strip()
+        else:
+            logger.warning(f"Resposta vazia ou bloqueada do Gemini: {resp}")
+            return "⚠️ A IA não conseguiu gerar ou foi bloqueada ao extrair esta letra."
+            
     except Exception as e:
         logger.error(f"Erro Gemini: {e}")
-        return "⚠️ Falha ao buscar a letra com a inteligência artificial. Verifique sua chave API."
+        return f"⚠️ Falha com a IA. Tente novamente."
 
 # =========================
 # Utilitários de UX
@@ -229,15 +243,11 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = m_data["val"]
     message_id = str(query.message.message_id)
 
-    if action == "s":
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Sim", callback_data=f"y|{key}"),
-            InlineKeyboardButton("❌ Não", callback_data=f"n|{key}")
-        ]])
-        await query.edit_message_text("📜 Letra?", reply_markup=markup)
-
-    elif action in ("y", "n", "c", "l"):
+    # Verifica se a ação é uma das esperadas para exibir ou alternar estado: 
+    # 's' = Seleção inicial, 'c' = Alternar capa, 'l' = Alternar letra
+    if action in ("s", "c", "l"):
         
+        # Inicia o estado da mensagem se for a primeira vez
         if message_id not in m_data["states"]:
             m_data["states"][message_id] = {
                 "show_cover": False,
@@ -248,21 +258,18 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = m_data["states"][message_id]
         user_name = state["user_name"]
 
-        if action == "y":
-            state["show_lyrics"] = True
-        elif action == "n":
-            state["show_lyrics"] = False
-        elif action == "c":
+        # Atualiza os Toggles baseados no clique
+        if action == "c":
             state["show_cover"] = not state["show_cover"]
         elif action == "l":
             state["show_lyrics"] = not state["show_lyrics"]
 
-        # Chama a API do Gemini!
+        # Chama a API do Gemini de forma assíncrona se a letra for ligada!
         if state["show_lyrics"] and "chorus" not in m_data:
             await query.edit_message_text("🎧 Buscando refrão com IA...")
             st = context.application.bot_data["settings"]
-            m_data["chorus"] = await asyncio.to_thread(
-                get_chorus_via_gemini, 
+            
+            m_data["chorus"] = await get_chorus_via_gemini(
                 m['title'], 
                 m['artist'], 
                 m['album'], 
@@ -271,6 +278,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         layout = ""
         
+        # Adiciona a capa invisível caso esteja ativada
         if state["show_cover"]:
             layout += f'<a href="{m["cover"]}">&#8203;</a>'
             
@@ -281,6 +289,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎤 <i>{html.escape(m['artist'])}</i>"
         )
 
+        # Adiciona a letra caso esteja ativada
         if state["show_lyrics"]:
             layout += (
                 f"\n\n<i>📜 Lyrics:</i>\n\n"
