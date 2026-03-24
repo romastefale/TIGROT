@@ -1,19 +1,24 @@
 # Pidro FM Bot
 
-Bot do Telegram para buscar músicas na Deezer e compartilhar resultados no chat ou no modo inline.
+Bot do Telegram focado em UX simples:
+
+1. `/music <termo>`
+2. escolhe uma música na lista
+3. decide entre **só música** ou **refrão**
+
+---
 
 ## Funcionalidades
 
-- Busca por texto no chat
-- Busca inline no Telegram
-- Paginação com botão `Load more`
-- Envio de capa do álbum com legenda formatada
-- Suporte a `polling` e `webhook`
+- Busca músicas na Deezer.
+- Resultado paginado com botão **Load more**.
+- Cartão com capa, preview e link Deezer quando disponível.
+- Busca letra (Genius, com fallback lyrics.ovh).
+- Extração de refrão com OpenAI (opcional) + fallback local.
+- Modo inline do Telegram.
+- Execução em `polling` ou `webhook`.
 
-## Requisitos
-
-- Python 3.10+
-- Token de bot do Telegram
+---
 
 ## Instalação
 
@@ -23,46 +28,77 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Configuração
+---
 
-Copie o arquivo `.env.example` e configure as variáveis:
+## Variáveis de ambiente
+
+- `TELEGRAM_TOKEN` (**obrigatória**)
+- `RUN_MODE` = `auto` (default), `polling` ou `webhook`
+- `WEBHOOK_URL` (obrigatória no modo webhook)
+- `WEBHOOK_SECRET` (opcional, auto-gerada se vazia)
+- `PORT` (default `8443`)
+- `GENIUS_API_KEY` (opcional)
+- `OPENAI_API_KEY` (opcional)
+
+> O bot carrega `.env` automaticamente se o arquivo existir.
+
+---
+
+## Rodar local
 
 ```bash
-cp .env.example .env
+python main.py
 ```
 
-Variáveis:
+- `RUN_MODE=auto` usa webhook se `WEBHOOK_URL` existir, senão polling.
+- Em Railway, prefira webhook para evitar `409 Conflict`.
 
-- `TELEGRAM_TOKEN`: token do bot
-- `WEBHOOK_URL`: URL pública para webhook (opcional)
-- `WEBHOOK_SECRET`: segredo do webhook (opcional)
-- `PORT`: porta da aplicação (padrão `8443`)
+---
 
-## Execução local
+## Railway (seu caso)
+
+Use no ambiente da Railway:
+
+```env
+TELEGRAM_TOKEN=SEU_TOKEN
+RUN_MODE=webhook
+WEBHOOK_URL=https://pidrofmbot-v2-production.up.railway.app
+WEBHOOK_SECRET=seu-segredo
+PORT=8443
+```
+
+URL final usada pelo bot:
+
+```text
+https://pidrofmbot-v2-production.up.railway.app/<TELEGRAM_TOKEN>
+```
+
+Registrar webhook manualmente (opcional):
 
 ```bash
-export TELEGRAM_TOKEN="seu-token"
-python pidrofmbot.py
+curl -X POST "https://api.telegram.org/botSEU_TOKEN/setWebhook" \
+  -d "url=https://pidrofmbot-v2-production.up.railway.app/SEU_TOKEN" \
+  -d "secret_token=SEU_SEGREDO"
 ```
 
-Se `WEBHOOK_URL` não estiver definido, o bot roda em modo polling.
+Conferir status webhook:
+
+```bash
+curl "https://api.telegram.org/botSEU_TOKEN/getWebhookInfo"
+```
+
+---
+
+## Comandos do bot
+
+- `/start`
+- `/help`
+- `/music <termo>`
+
+---
 
 ## Testes
 
 ```bash
-pytest
-```
-
-## Estrutura
-
-- `pidrofmbot.py`: aplicação principal
-- `tests/test_pidrofmbot.py`: testes unitários básicos
-- `.env.example`: exemplo de configuração
-
-## ZIP para distribuição
-
-Você pode gerar um pacote ZIP com:
-
-```bash
-zip -r pidrofmbot-package.zip . -x '.git/*' '.pytest_cache/*' '__pycache__/*' '.venv/*'
+pytest -q
 ```
