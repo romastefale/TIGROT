@@ -57,7 +57,6 @@ _executor = ThreadPoolExecutor(max_workers=4)
 def get_chorus_via_api(title, artist):
     """Consome a API Lyrics.ovh e extrai preferencialmente o refrão."""
     try:
-        # Limpeza simples para a URL da API
         clean_artist = re.sub(r'[\(\[].*[\)\]]', '', artist).strip()
         clean_title = re.sub(r'[\(\[].*[\)\]]', '', title).strip()
         
@@ -71,22 +70,21 @@ def get_chorus_via_api(title, artist):
         if not full_lyrics:
             return None
 
-        # 1. Tenta encontrar por marcadores comuns [Chorus], [Refrão], etc.
+        # Tenta encontrar por marcadores comuns
         parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_lyrics, flags=re.IGNORECASE)
         if len(parts) > 1:
-            # O conteúdo após a tag até o próximo bloco duplo de linha
             return parts[2].strip().split('\n\n')[0]
 
-        # 2. Heurística de Engenharia: O refrão é a estrofe que mais se repete
+        # Heurística: estrofe que mais se repete
         stanzas = [s.strip() for s in full_lyrics.split('\n\n') if len(s.strip()) > 20]
         if stanzas:
             counts = Counter(stanzas)
             most_common = counts.most_common(1)[0]
             if most_common[1] > 1:
                 return most_common[0]
-            return stanzas[0] # Fallback: primeira estrofe
+            return stanzas[0]
 
-        return full_lyrics[:250] + "..." # Fallback extremo
+        return full_lyrics[:250] + "..."
     except Exception as e:
         logger.error(f"Erro na API de Letras: {e}")
         return None
@@ -159,9 +157,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state["show_lyrics"] and "chorus" not in m_data:
         loop = asyncio.get_event_loop()
-        # Chama a nova função de API
         chorus = await loop.run_in_executor(_executor, get_chorus_via_api, m['title'], m['artist'])
-        m_data["chorus"] = chorus or "⚠️ Letra não encontrada na API."
+        m_data["chorus"] = chorus or "⚠️ Letra não encontrada."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
@@ -174,7 +171,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if state["show_lyrics"]:
-        layout += f"\n\n<i>📜 Lyrics:</i>\n\n<blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
+        # Remoção da quebra de linha após "📜 Lyrics:"
+        layout += f"\n\n<i>📜 Lyrics:</i> <blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
 
     markup = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ 🖼️ Cover" if state["show_cover"] else "🖼️ Cover", callback_data=f"c|{key}"),
