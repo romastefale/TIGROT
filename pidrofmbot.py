@@ -90,12 +90,16 @@ def search_deezer_sync(query):
 # HANDLERS
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "🎹 Bot de música! Digite o nome da música ou use via inline."
+    msg = (
+        "🎹 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
+        "🎧 Para usar, basta digitar o nome da música…\n\n"
+        "📜 Se quiser a letra do refrão só pedir!"
+    )
     await update.message.reply_text(msg)
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
-    author_id = update.message.from_user.id # ID de quem enviou a mensagem
+    user_id = update.message.from_user.id # Captura o autor
     loop = asyncio.get_event_loop()
     tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
     
@@ -111,7 +115,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "title": t["title"], "artist": t["artist"]["name"],
                 "album": t["album"]["title"], "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
             },
-            "author_id": author_id, # SALVANDO O AUTOR
+            "author_id": user_id, # Armazena o autor no cache
             "states": {}, 
             "expires_at": time.time() + 1800
         }
@@ -121,21 +125,22 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
     parts = query.data.split("|")
     action, key = parts[0], parts[1]
-    
     m_data = music_cache.get(key)
+    
     if not m_data:
-        await query.answer("❌ Sessão expirada. Pesquise novamente.", show_alert=True)
+        await query.answer("❌ Sessão expirada.", show_alert=True)
         return
 
-    # --- VALIDAÇÃO DE AUTOR ---
+    # TRAVA DE SEGURANÇA: Verifica se quem clicou é o autor
     if m_data.get("author_id") and query.from_user.id != m_data["author_id"]:
-        await query.answer("⚠️ Só o autor da mensagem pode alterar o layout!", show_alert=True)
+        await query.answer("⚠️ Apenas quem enviou a mensagem pode alterar o layout!", show_alert=True)
         return
-    # --------------------------
 
     await query.answer()
+    
     m = m_data["val"]
     msg_id = str(query.message.message_id) if query.message else query.inline_message_id
 
@@ -156,10 +161,12 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
+    
     layout += (
         f"🎹 {state['user_name']} está ouvindo...\n\n"
         f"🎧 <b>{html.escape(m['title'])}</b> - <i>{html.escape(m['album'])} — {html.escape(m['artist'])}</i>"
     )
+
     if state["show_lyrics"]:
         layout += f"\n\n<i>📜 Lyrics:</i> <blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
 
@@ -178,7 +185,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query
     if not query: return
-    author_id = update.inline_query.from_user.id # ID de quem está usando o inline
+    user_id = update.inline_query.from_user.id # Captura o autor no inline
     loop = asyncio.get_event_loop()
     tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
     user_name = html.escape(update.inline_query.from_user.first_name)
@@ -191,7 +198,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "title": t["title"], "artist": t["artist"]["name"], 
                 "album": t["album"]["title"], "cover": t["album"]["cover_xl"]
             },
-            "author_id": author_id, # SALVANDO O AUTOR NO INLINE
+            "author_id": user_id, # Armazena o autor no cache
             "states": {}, 
             "expires_at": time.time() + 1800
         }
@@ -216,6 +223,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ))
     await update.inline_query.answer(results, cache_time=5)
 
+# =========================
+# MAIN
+# =========================
 def main():
     if not TOKEN: return
     app = Application.builder().token(TOKEN).build()
@@ -223,7 +233,13 @@ def main():
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
     app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^(c|l|s)\|"))
-    app.run_polling(drop_pending_updates=True)
+
+    if WEBHOOK_URL:
+        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN,
+                        webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+                        secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
+    else:
+        app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
