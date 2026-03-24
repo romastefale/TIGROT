@@ -205,7 +205,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         btns.append([InlineKeyboardButton(f"{t['title']} - {t['artist']}", callback_data=f"s|{t_key}")])
     
     markup = InlineKeyboardMarkup(btns)
-    await update.message.reply_text(f"🔍 Selecione a música:", reply_markup=markup)
+    await update.message.reply_text("♪ Escolha uma música...", reply_markup=markup)
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -233,21 +233,23 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Usuário respondeu a pergunta da letra
     elif action in ("y", "n"):
         
-        # Formatação HTML que simula visualmente o Markdown solicitado
+        # Pega o primeiro nome de quem clicou no botão
+        user_name = html.escape(query.from_user.first_name)
+
+        # Base do layout (comum para as duas escolhas)
         base_layout = (
+            f"♫ {user_name} está ouvindo...\n\n"
             f"♬ <b>{html.escape(m['title'])}</b>\n"
             f"▶ <i>{html.escape(m['album'])}</i>\n"
             f"★ <i>{html.escape(m['artist'])}</i>"
         )
 
-        # Botão extra opcional pra ficar legal a UX (Ouvir no Deezer)
-        deezer_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🎧 Ouvir no Deezer", url=m["deezer_url"])]])
-
         if action == "n":
-            await query.edit_message_text(base_layout, parse_mode=ParseMode.HTML, reply_markup=deezer_btn)
+            # Usuário não quer a letra, manda só o cabeçalho
+            await query.edit_message_text(base_layout, parse_mode=ParseMode.HTML)
             return
 
-        # Se for "y", busca a letra
+        # Se for "y", avisa que está buscando a letra
         await query.edit_message_text("🎧 Buscando refrão...")
         st = context.application.bot_data["settings"]
         
@@ -261,7 +263,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<blockquote>{html.escape(chorus)}</blockquote>"
         )
         
-        await query.edit_message_text(final_layout, parse_mode=ParseMode.HTML, reply_markup=deezer_btn)
+        await query.edit_message_text(final_layout, parse_mode=ParseMode.HTML)
 
 async def post_init(app: Application):
     me = await app.bot.get_me()
