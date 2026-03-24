@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
-from openai import OpenAI
+import google.generativeai as genai
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class Settings:
     token: str
-    openai_api_key: str | None
+    gemini_api_key: str | None
     webhook_url: str | None
     webhook_secret: str | None
     port: int
@@ -68,7 +68,7 @@ def load_settings() -> Settings:
 
     return Settings(
         token=token,
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
         webhook_url=webhook_url,
         webhook_secret=secret,
         port=port
@@ -136,36 +136,32 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
         return []
 
 # =========================
-# Lógica de Letras (OpenAI Direta)
+# Lógica de Letras (Gemini)
 # =========================
-def get_chorus_via_openai(title: str, artist: str, album: str, openai_key: str | None) -> str:
-    if not openai_key:
-        return "❌ Erro: OPENAI_API_KEY não configurada."
+def get_chorus_via_gemini(title: str, artist: str, album: str, gemini_key: str | None) -> str:
+    if not gemini_key:
+        return "❌ Erro: GEMINI_API_KEY não configurada."
     
     try:
-        client = OpenAI(api_key=openai_key)
-        # Novo prompt mais direto, conforme solicitado!
+        genai.configure(api_key=gemini_key)
+        # Usando o modelo flash que é super rápido e inteligente
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
         prompt = (
             f"Forneça o Refrão da música {title}, de {artist}, do album {album}. "
             "Retorne APENAS as linhas da letra do refrão. Sem aspas, sem introdução, sem títulos."
         )
         
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        content = resp.choices[0].message.content
-        return content.strip() if content else "⚠️ Erro ao extrair o refrão."
+        resp = model.generate_content(prompt)
+        return resp.text.strip() if resp.text else "⚠️ Erro ao extrair o refrão."
     except Exception as e:
-        logger.error(f"Erro OpenAI: {e}")
-        return "⚠️ Falha ao buscar a letra com a inteligência artificial. Verifique sua chave API ou saldo."
+        logger.error(f"Erro Gemini: {e}")
+        return "⚠️ Falha ao buscar a letra com a inteligência artificial. Verifique sua chave API."
 
 # =========================
 # Utilitários de UX
 # =========================
 def get_final_markup(key: str, show_cover: bool, show_lyrics: bool) -> InlineKeyboardMarkup:
-    # UX: Adiciona um checkmark colorido ✅ se o toggle estiver ativo e muda o emoji principal
     btn_cover = "✅ 🖼️ Cover" if show_cover else "🖼️ Cover"
     btn_lyrics = "✅ 📜 Lyrics" if show_lyrics else "📜 Lyrics"
     
@@ -191,8 +187,8 @@ async def safe_edit_message(query, text: str, markup: InlineKeyboardMarkup, disa
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🎶 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
-        "🎵 Para usar, basta digitar o nome da música…\n\n"
+        "🎹 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
+        "🎧 Para usar, basta digitar o nome da música…\n\n"
         "📜 Se quiser a letra do refrão só pedir!"
     )
     await update.message.reply_text(msg)
@@ -211,13 +207,11 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btns = []
     for t in tracks:
         t_key = hashlib.md5(f"{t['deezer_url']}".encode()).hexdigest()[:8]
-        # Inicia o cache com um sub-dicionário de 'states' para gerenciar as mensagens
         music_cache[t_key] = {"val": t, "states": {}, "expires_at": get_now() + CACHE_TTL}
-        # Botões de busca simples sem emojis pra não poluir
         btns.append([InlineKeyboardButton(f"{t['title']} - {t['artist']}", callback_data=f"s|{t_key}")])
     
     markup = InlineKeyboardMarkup(btns)
-    await update.message.reply_text("🎵 Escolha uma música...", reply_markup=markup)
+    await update.message.reply_text("🎧 Escolha uma música...", reply_markup=markup)
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -235,7 +229,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = m_data["val"]
     message_id = str(query.message.message_id)
 
-    # 1. Usuário selecionou a música na lista
     if action == "s":
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Sim", callback_data=f"y|{key}"),
@@ -243,10 +236,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         await query.edit_message_text("📜 Letra?", reply_markup=markup)
 
-    # 2. Usuário está nos controles finais (Toggle e escolhas iniciais)
     elif action in ("y", "n", "c", "l"):
         
-        # Garante que o estado dessa mensagem específica exista
         if message_id not in m_data["states"]:
             m_data["states"][message_id] = {
                 "show_cover": False,
@@ -257,54 +248,46 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = m_data["states"][message_id]
         user_name = state["user_name"]
 
-        # Atualiza os Toggles baseados no clique
         if action == "y":
             state["show_lyrics"] = True
         elif action == "n":
             state["show_lyrics"] = False
         elif action == "c":
-            state["show_cover"] = not state["show_cover"] # Inverte o estado da Capa
+            state["show_cover"] = not state["show_cover"]
         elif action == "l":
-            state["show_lyrics"] = not state["show_lyrics"] # Inverte o estado da Letra
+            state["show_lyrics"] = not state["show_lyrics"]
 
-        # Se precisa mostrar a letra e ainda não buscou, busca agora com o novo prompt
+        # Chama a API do Gemini!
         if state["show_lyrics"] and "chorus" not in m_data:
             await query.edit_message_text("🎧 Buscando refrão com IA...")
             st = context.application.bot_data["settings"]
             m_data["chorus"] = await asyncio.to_thread(
-                get_chorus_via_openai, 
+                get_chorus_via_gemini, 
                 m['title'], 
                 m['artist'], 
                 m['album'], 
-                st.openai_api_key
+                st.gemini_api_key
             )
 
-        # Constrói o layout de forma dinâmica complementando as opções
         layout = ""
         
-        # 1º Bloco: A Capa (Se ativo, joga o link invisível pra forçar o preview)
         if state["show_cover"]:
             layout += f'<a href="{m["cover"]}">&#8203;</a>'
             
-        # 2º Bloco: O cabeçalho e info da música
         layout += (
-            f"🎶 {user_name} está ouvindo...\n\n"
-            f"🎵 <b>{html.escape(m['title'])}</b>\n"
+            f"🎹 {user_name} está ouvindo...\n\n"
+            f"🎧 <b>{html.escape(m['title'])}</b>\n"
             f"💿 <i>{html.escape(m['album'])}</i>\n"
             f"🎤 <i>{html.escape(m['artist'])}</i>"
         )
 
-        # 3º Bloco: A Letra (Adiciona ao final se estiver ativo)
         if state["show_lyrics"]:
             layout += (
                 f"\n\n<i>📜 Lyrics:</i>\n\n"
                 f"<blockquote>{html.escape(m_data['chorus'])}</blockquote>"
             )
 
-        # Monta os botões com seus estados coloridos atuais (✅ 🖼️ ou 📜)
         markup = get_final_markup(key, state["show_cover"], state["show_lyrics"])
-
-        # O preview do link deve ser DESATIVADO caso a capa não deva ser exibida.
         disable_preview = not state["show_cover"]
 
         await safe_edit_message(query, layout, markup, disable_preview)
