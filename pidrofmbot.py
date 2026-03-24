@@ -6,10 +6,8 @@ import logging
 import requests
 import hashlib
 import html
-import unicodedata
-import random
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
@@ -54,77 +52,44 @@ music_cache = {}
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # =========================
-# LÓGICA DE LETRAS (3 FONTES + 5 VERSOS)
+# LÓGICA DE LETRAS (API LYRICS.OVH)
 # =========================
-def get_chorus_via_scraping(title, artist):
-    """Tenta obter a letra em 3 fontes diferentes e extrai 5 versos aleatórios."""
-    
-    def clean_name(text):
-        text = re.sub(r'[\(\[][Ff]eat\.?.*[\)\]]', '', text)
-        text = re.sub(r'[\(\[][Rr]emix.*[\)\]]', '', text)
-        text = re.sub(r'[\(\[].*[\)\]]', '', text)
-        text = text.split(' - ')[0]
-        return text.strip()
-
-    def slugify(text, sep='-'):
-        text = clean_name(text).lower()
-        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-        text = re.sub(r'[^a-z0-9]', sep, text)
-        return text.strip(sep)
-
-    def extract_random_verses(html_content, selectors):
-        soup = BeautifulSoup(html_content, 'html.parser')
-        lyrics_div = None
-        for sel in selectors:
-            lyrics_div = soup.select_one(sel)
-            if lyrics_div: break
+def get_chorus_via_api(title, artist):
+    """Consome a API Lyrics.ovh e extrai preferencialmente o refrão."""
+    try:
+        # Limpeza simples para a URL da API
+        clean_artist = re.sub(r'[\(\[].*[\)\]]', '', artist).strip()
+        clean_title = re.sub(r'[\(\[].*[\)\]]', '', title).strip()
         
-        if not lyrics_div: return None
-
-        for br in lyrics_div.find_all("br"): br.replace_with("\n")
-        lines = [
-            l.strip() for l in lyrics_div.get_text("\n").split('\n') 
-            if l.strip() and not l.startswith('[') and not l.endswith(':')
-        ]
+        url = f"https://api.lyrics.ovh/v1/{clean_artist}/{clean_title}"
+        resp = session.get(url, timeout=10)
         
-        if not lines: return None
-        num = 5
-        if len(lines) <= num: return "\n".join(lines)
-        start = random.randint(0, len(lines) - num)
-        return "\n".join(lines[start : start + num])
+        if resp.status_code != 200:
+            return None
+            
+        full_lyrics = resp.json().get("lyrics", "")
+        if not full_lyrics:
+            return None
 
-    # Configuração das 3 fontes
-    s_artist = slugify(artist)
-    s_title = slugify(title)
-    
-    sources = [
-        {
-            "url": f"https://www.letras.mus.br/{s_artist}/{s_title}/",
-            "selectors": [".lyric-canv", ".cnt-letra"]
-        },
-        {
-            "url": f"https://www.vagalume.com.br/{s_artist}/{s_title}/",
-            "selectors": ["#lyrics"]
-        },
-        {
-            "url": f"https://genius.com/{slugify(artist, sep='-').capitalize()}-{slugify(title, sep='-')}-lyrics",
-            "selectors": ["[class^='Lyrics__Container']", ".lyrics"]
-        }
-    ]
+        # 1. Tenta encontrar por marcadores comuns [Chorus], [Refrão], etc.
+        parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_lyrics, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            # O conteúdo após a tag até o próximo bloco duplo de linha
+            return parts[2].strip().split('\n\n')[0]
 
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        # 2. Heurística de Engenharia: O refrão é a estrofe que mais se repete
+        stanzas = [s.strip() for s in full_lyrics.split('\n\n') if len(s.strip()) > 20]
+        if stanzas:
+            counts = Counter(stanzas)
+            most_common = counts.most_common(1)[0]
+            if most_common[1] > 1:
+                return most_common[0]
+            return stanzas[0] # Fallback: primeira estrofe
 
-    for source in sources:
-        try:
-            resp = session.get(source["url"], headers=headers, timeout=5)
-            if resp.status_code == 200:
-                snippet = extract_random_verses(resp.text, source["selectors"])
-                if snippet: return snippet
-        except Exception as e:
-            logger.error(f"Erro na fonte {source['url']}: {e}")
-            continue
-
-    return None
+        return full_lyrics[:250] + "..." # Fallback extremo
+    except Exception as e:
+        logger.error(f"Erro na API de Letras: {e}")
+        return None
 
 # =========================
 # LÓGICA DE BUSCA DEEZER
@@ -161,13 +126,10 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
         music_cache[t_key] = {
             "val": {
-                "title": t["title"],
-                "artist": t["artist"]["name"],
-                "album": t["album"]["title"],
-                "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
+                "title": t["title"], "artist": t["artist"]["name"],
+                "album": t["album"]["title"], "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
             },
-            "states": {},
-            "expires_at": time.time() + 1800
+            "states": {}, "expires_at": time.time() + 1800
         }
         btns.append([InlineKeyboardButton(f"{t['title']} — {t['artist']['name']}", callback_data=f"s|{t_key}")])
     
@@ -187,8 +149,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg_id not in m_data["states"]:
         m_data["states"][msg_id] = {
-            "show_cover": False,
-            "show_lyrics": False,
+            "show_cover": False, "show_lyrics": False,
             "user_name": html.escape(query.from_user.first_name)
         }
     
@@ -198,8 +159,9 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state["show_lyrics"] and "chorus" not in m_data:
         loop = asyncio.get_event_loop()
-        chorus = await loop.run_in_executor(_executor, get_chorus_via_scraping, m['title'], m['artist'])
-        m_data["chorus"] = chorus or "⚠️ Trecho da letra não disponível em nenhuma das fontes."
+        # Chama a nova função de API
+        chorus = await loop.run_in_executor(_executor, get_chorus_via_api, m['title'], m['artist'])
+        m_data["chorus"] = chorus or "⚠️ Letra não encontrada na API."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
@@ -212,7 +174,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if state["show_lyrics"]:
-        layout += f"\n\n<i>📜 Lyrics (Random):</i>\n\n<blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
+        layout += f"\n\n<i>📜 Lyrics:</i>\n\n<blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
 
     markup = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ 🖼️ Cover" if state["show_cover"] else "🖼️ Cover", callback_data=f"c|{key}"),
