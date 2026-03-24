@@ -7,7 +7,7 @@ import requests
 import hashlib
 import html
 import unicodedata
-from collections import Counter
+import random
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 
@@ -54,64 +54,64 @@ music_cache = {}
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # =========================
-# LÓGICA DE LETRAS APRIMORADA
+# LÓGICA DE LETRAS (5 VERSOS ALEATÓRIOS)
 # =========================
 def get_chorus_via_scraping(title, artist):
-    """Busca a letra e identifica o refrão por tag ou repetição."""
+    """Busca a letra e seleciona 5 versos consecutivos aleatórios."""
     try:
         def clean_name(text):
-            # Remove (feat...), [Remix], - Live, etc, que poluem a busca
             text = re.sub(r'[\(\[][Ff]eat\.?.*[\)\]]', '', text)
             text = re.sub(r'[\(\[][Rr]emix.*[\)\]]', '', text)
             text = re.sub(r'[\(\[].*[\)\]]', '', text)
-            text = text.split(' - ')[0] # Remove sufixos após traço
+            text = text.split(' - ')[0]
             return text.strip()
 
         def slugify(text):
             text = clean_name(text).lower()
-            # Remove acentos
             text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
             text = re.sub(r'[^a-z0-9]', '-', text)
             return text.strip('-')
 
-        # Tenta a URL com nome limpo e a URL bruta
         slug_artist = slugify(artist)
         slug_title = slugify(title)
         
-        urls = [
-            f"https://www.letras.mus.br/{slug_artist}/{slug_title}/",
-            f"https://www.letras.mus.br/{slugify(artist)}/{slugify(title)}/"
+        url = f"https://www.letras.mus.br/{slug_artist}/{slug_title}/"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = session.get(url, headers=headers, timeout=5)
+        
+        if response.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
+        
+        if not lyrics_div:
+            return None
+
+        for br in lyrics_div.find_all("br"):
+            br.replace_with("\n")
+        
+        # Limpa a letra: remove tags como [Refrão] e linhas vazias
+        full_text = lyrics_div.get_text("\n")
+        lines = [
+            line.strip() for line in full_text.split('\n') 
+            if line.strip() and not line.startswith('[') and not line.endswith(':')
         ]
 
-        full_text = ""
-        for url in urls:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = session.get(url, headers=headers, timeout=5)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
-                if lyrics_div:
-                    for br in lyrics_div.find_all("br"): br.replace_with("\n")
-                    full_text = lyrics_div.get_text("\n").strip()
-                    break
+        if not lines:
+            return None
+
+        # Se a música for muito curta, envia o que tiver
+        num_verses = 5
+        if len(lines) <= num_verses:
+            return "\n".join(lines)
+
+        # Escolhe um ponto de partida aleatório para pegar 5 versos consecutivos
+        start_index = random.randint(0, len(lines) - num_verses)
+        selected_snippet = lines[start_index : start_index + num_verses]
         
-        if not full_text: return None
+        return "\n".join(selected_snippet)
 
-        # 1. Tenta achar pela tag [Refrão] ou [Chorus]
-        parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_text, flags=re.IGNORECASE)
-        if len(parts) > 1:
-            return parts[2].strip().split('\n\n')[0]
-
-        # 2. Heurística: Identifica a estrofe que mais se repete (O Refrão real)
-        stanzas = [s.strip() for s in full_text.split('\n\n') if len(s.strip()) > 20]
-        if stanzas:
-            counts = Counter(stanzas)
-            most_common = counts.most_common(1)[0]
-            if most_common[1] > 1: # Se repete pelo menos uma vez
-                return most_common[0]
-            return stanzas[0] # Fallback: primeira estrofe
-
-        return None
     except Exception as e:
         logger.error(f"Erro no scraping: {e}")
         return None
@@ -189,7 +189,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state["show_lyrics"] and "chorus" not in m_data:
         loop = asyncio.get_event_loop()
         chorus = await loop.run_in_executor(_executor, get_chorus_via_scraping, m['title'], m['artist'])
-        m_data["chorus"] = chorus or "⚠️ Refrão não encontrado nesta fonte."
+        m_data["chorus"] = chorus or "⚠️ Trecho da letra não disponível no momento."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
@@ -202,7 +202,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if state["show_lyrics"]:
-        layout += f"\n\n<i>📜 Lyrics:</i>\n\n<blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
+        layout += f"\n\n<i>📜 Lyrics (Random):</i>\n\n<blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
 
     markup = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ 🖼️ Cover" if state["show_cover"] else "🖼️ Cover", callback_data=f"c|{key}"),
