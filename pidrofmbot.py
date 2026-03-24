@@ -6,8 +6,8 @@ import logging
 import requests
 import hashlib
 import html
-import google.generativeai as genai
 from concurrent.futures import ThreadPoolExecutor
+from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
@@ -37,45 +37,74 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
 
 try:
     PORT = int(os.getenv("PORT", 8443))
-except ValueError:
+except (ValueError, TypeError):
     PORT = 8443
 
 session = requests.Session()
-music_cache = {}  # Armazena dados das músicas e estados (toggles)
+music_cache = {}  
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # =========================
-# LÓGICA DE IA (GEMINI)
+# LÓGICA DE SCRAPING (SEM API)
 # =========================
-async def get_chorus_via_gemini(title, artist, album):
-    if not GEMINI_KEY:
-        return "⚠️ Erro: GEMINI_API_KEY não configurada."
+def get_chorus_via_scraping(title, artist):
+    """Busca a letra no Letras.mus.br e tenta extrair o refrão."""
     try:
-        genai.configure(api_key=GEMINI_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = (
-            f"Forneça o Refrão da música {title}, de {artist}, do album {album}. "
-            "Retorne APENAS as linhas da letra do refrão. Sem aspas, sem introdução, sem títulos."
-        )
-        safety = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
-        resp = await model.generate_content_async(prompt, safety_settings=safety)
-        return resp.text.strip() if resp.text else "⚠️ Letra não encontrada."
-    except Exception:
-        return "⚠️ Falha ao buscar a letra com IA."
+        def slugify(text):
+            text = text.lower()
+            text = re.sub(r'[àáâãäå]', 'a', text)
+            text = re.sub(r'[èéêë]', 'e', text)
+            text = re.sub(r'[ìíîï]', 'i', text)
+            text = re.sub(r'[òóôõö]', 'o', text)
+            text = re.sub(r'[ùúûü]', 'u', text)
+            text = re.sub(r'ç', 'c', text)
+            text = re.sub(r'[^a-z0-9]', '-', text)
+            return text.strip('-')
+
+        # Monta a URL provável
+        url = f"https://www.letras.mus.br/{slugify(artist)}/{slugify(title)}/"
+        
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = session.get(url, headers=headers, timeout=5)
+
+        if response.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
+        
+        if not lyrics_div:
+            return None
+
+        # Preserva quebras de linha
+        for br in lyrics_div.find_all("br"):
+            br.replace_with("\n")
+        
+        full_text = lyrics_div.get_text("\n")
+
+        # Busca bloco de refrão por tags comuns [Refrão], [Chorus] ou (Refrão)
+        parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:)', full_text, flags=re.IGNORECASE)
+        
+        if len(parts) > 1:
+            # O conteúdo do refrão geralmente vem após o marcador
+            chorus = parts[2].strip().split('\n\n')[0]
+            return chorus
+        
+        # Fallback: Se não achar tag de refrão, pega as primeiras 5 linhas
+        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+        return "\n".join(lines[:5]) + "..."
+
+    except Exception as e:
+        logger.error(f"Erro no scraping: {e}")
+        return None
 
 # =========================
-# BUSCA E CACHE
+# LÓGICA DE BUSCA DEEZER
 # =========================
 def score_track(track, query):
     title = track.get("title", "").lower()
@@ -112,7 +141,7 @@ def get_final_markup(key, show_cover, show_lyrics):
     ]])
 
 # =========================
-# MODO INLINE
+# HANDLERS
 # =========================
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query
@@ -125,7 +154,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, track in enumerate(tracks[:10]):
         try:
             t_key = hashlib.md5(track["link"].encode()).hexdigest()[:8]
-            # Salva no cache para os botões funcionarem depois do envio
             music_cache[t_key] = {
                 "val": {
                     "title": track["title"],
@@ -143,7 +171,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo_url=track["album"]["cover_big"],
                     thumbnail_url=track["album"]["cover_small"],
                     title=f"{track['title']} — {track['artist']['name']}",
-                    description=f"Album: {track['album']['title']}",
                     caption=(
                         f"🎹 {user_name} está ouvindo...\n\n"
                         f"🎧 <b>{html.escape(track['title'])}</b>\n"
@@ -158,9 +185,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.inline_query.answer(results, cache_time=5)
 
-# =========================
-# CALLBACK HANDLER (TOGGLES)
-# =========================
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -186,9 +210,12 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "c": state["show_cover"] = not state["show_cover"]
     elif action == "l": state["show_lyrics"] = not state["show_lyrics"]
 
+    # Busca a letra apenas se o botão for clicado e não estiver no cache
     if state["show_lyrics"] and "chorus" not in m_data:
-        # Edit temporário para feedback
-        state["chorus"] = await get_chorus_via_gemini(m['title'], m['artist'], m['album'])
+        # Executa o scraping em uma thread separada para não travar o bot
+        loop = asyncio.get_event_loop()
+        chorus = await loop.run_in_executor(_executor, get_chorus_via_scraping, m['title'], m['artist'])
+        m_data["chorus"] = chorus or "⚠️ Refrão não encontrado automaticamente."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
@@ -201,7 +228,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if state["show_lyrics"]:
-        layout += f"\n\n<i>📜 Lyrics:</i>\n\n<blockquote>{html.escape(m_data['chorus'])}</blockquote>"
+        lyrics = m_data.get("chorus", "⚠️ Carregando...")
+        layout += f"\n\n<i>📜 Refrão:</i>\n\n<blockquote>{html.escape(lyrics)}</blockquote>"
 
     try:
         await query.edit_message_text(
@@ -212,9 +240,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except BadRequest: pass
 
-# =========================
-# BUSCA NO CHAT
-# =========================
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
     tracks = await search_deezer(query)
@@ -223,7 +248,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = []
-    for t in tracks[:10]:
+    for t in tracks[:8]:
         t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
         music_cache[t_key] = {
             "val": {
@@ -235,30 +260,20 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "states": {},
             "expires_at": time.time() + 1800
         }
-        keyboard.append([InlineKeyboardButton(f"{t['title']} — {t['artist']['name']}", callback_data=f"s|{t_key}")])
+        keyboard.append([InlineKeyboardButton(f"{t['title']} — {t['artist']['name']}", callback_data=f"l|{t_key}")])
 
-    await update.message.reply_text("🎧 Escolha uma música...", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("🎧 Escolha uma música para exibir o card:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def select_track_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Simula o clique inicial no chat para mostrar o card
-    query = update.callback_query
-    await query.answer()
-    key = query.data.split("|")[1]
-    # Reutiliza a lógica do toggle para exibir o card inicial (action 'n' não existe mais, usamos o estado base)
-    query.data = f"l|{key}" # Força o fluxo de exibição
-    # Como queremos apenas exibir sem a letra primeiro, mas o handler gerencia isso:
-    await cb_handler(update, context)
-
-# =========================
-# MAIN
-# =========================
 def main():
+    if not TOKEN:
+        print("Erro: TELEGRAM_TOKEN não definido!")
+        return
+
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
     app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^(c|l)\|"))
-    app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^s\|")) # Clique na lista do chat
 
     if WEBHOOK_URL:
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN,
