@@ -165,13 +165,10 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     layout += (
         f"🎹 {state['user_name']} está ouvindo...\n\n"
-        f"🎧 <b>{html.escape(m['title'])}</b>\n"
-        f"💿 <i>{html.escape(m['album'])}</i>\n"
-        f"🎤 <i>{html.escape(m['artist'])}</i>"
+        f"🎧 <b>{html.escape(m['title'])}</b> - <i>{html.escape(m['album'])} — {html.escape(m['artist'])}</i>"
     )
 
     if state["show_lyrics"]:
-        # Remoção da quebra de linha após "📜 Lyrics:"
         layout += f"\n\n<i>📜 Lyrics:</i> <blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
 
     markup = InlineKeyboardMarkup([[
@@ -204,11 +201,10 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "states": {}, "expires_at": time.time() + 1800
         }
         
+        # Layout consolidado em uma única linha
         text_content = (
             f"🎹 {user_name} está ouvindo...\n\n"
-            f"🎧 <b>{html.escape(t['title'])}</b>\n"
-            f"💿 <i>{html.escape(t['album']['title'])}</i>\n"
-            f"🎤 <i>{html.escape(t['artist']['name'])}</i>"
+            f"🎧 <b>{html.escape(t['title'])}</b> - <i>{html.escape(t['album']['title'])} — {html.escape(t['artist']['name'])}</i>"
         )
 
         results.append(InlineQueryResultArticle(
