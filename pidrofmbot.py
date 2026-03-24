@@ -6,6 +6,8 @@ import logging
 import requests
 import hashlib
 import html
+import unicodedata
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 
@@ -52,38 +54,67 @@ music_cache = {}
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # =========================
-# LÓGICA DE LETRAS (SCRAPING)
+# LÓGICA DE LETRAS APRIMORADA
 # =========================
 def get_chorus_via_scraping(title, artist):
+    """Busca a letra e identifica o refrão por tag ou repetição."""
     try:
+        def clean_name(text):
+            # Remove (feat...), [Remix], - Live, etc, que poluem a busca
+            text = re.sub(r'[\(\[][Ff]eat\.?.*[\)\]]', '', text)
+            text = re.sub(r'[\(\[][Rr]emix.*[\)\]]', '', text)
+            text = re.sub(r'[\(\[].*[\)\]]', '', text)
+            text = text.split(' - ')[0] # Remove sufixos após traço
+            return text.strip()
+
         def slugify(text):
-            text = text.lower()
-            text = re.sub(r'[àáâãäå]', 'a', text)
-            text = re.sub(r'[èéêë]', 'e', text)
-            text = re.sub(r'[ìíîï]', 'i', text)
-            text = re.sub(r'[òóôõö]', 'o', text)
-            text = re.sub(r'[ùúûü]', 'u', text)
-            text = re.sub(r'ç', 'c', text)
+            text = clean_name(text).lower()
+            # Remove acentos
+            text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
             text = re.sub(r'[^a-z0-9]', '-', text)
             return text.strip('-')
 
-        url = f"https://www.letras.mus.br/{slugify(artist)}/{slugify(title)}/"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = session.get(url, headers=headers, timeout=5)
-        if response.status_code != 200: return None
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
-        if not lyrics_div: return None
-
-        for br in lyrics_div.find_all("br"): br.replace_with("\n")
-        full_text = lyrics_div.get_text("\n")
-        parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:)', full_text, flags=re.IGNORECASE)
+        # Tenta a URL com nome limpo e a URL bruta
+        slug_artist = slugify(artist)
+        slug_title = slugify(title)
         
-        if len(parts) > 1: return parts[2].strip().split('\n\n')[0]
-        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-        return "\n".join(lines[:5]) + "..."
-    except Exception: return None
+        urls = [
+            f"https://www.letras.mus.br/{slug_artist}/{slug_title}/",
+            f"https://www.letras.mus.br/{slugify(artist)}/{slugify(title)}/"
+        ]
+
+        full_text = ""
+        for url in urls:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = session.get(url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
+                if lyrics_div:
+                    for br in lyrics_div.find_all("br"): br.replace_with("\n")
+                    full_text = lyrics_div.get_text("\n").strip()
+                    break
+        
+        if not full_text: return None
+
+        # 1. Tenta achar pela tag [Refrão] ou [Chorus]
+        parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_text, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            return parts[2].strip().split('\n\n')[0]
+
+        # 2. Heurística: Identifica a estrofe que mais se repete (O Refrão real)
+        stanzas = [s.strip() for s in full_text.split('\n\n') if len(s.strip()) > 20]
+        if stanzas:
+            counts = Counter(stanzas)
+            most_common = counts.most_common(1)[0]
+            if most_common[1] > 1: # Se repete pelo menos uma vez
+                return most_common[0]
+            return stanzas[0] # Fallback: primeira estrofe
+
+        return None
+    except Exception as e:
+        logger.error(f"Erro no scraping: {e}")
+        return None
 
 # =========================
 # LÓGICA DE BUSCA DEEZER
@@ -138,7 +169,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     parts = query.data.split("|")
     action, key = parts[0], parts[1]
-
     m_data = music_cache.get(key)
     if not m_data: return
         
@@ -159,7 +189,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state["show_lyrics"] and "chorus" not in m_data:
         loop = asyncio.get_event_loop()
         chorus = await loop.run_in_executor(_executor, get_chorus_via_scraping, m['title'], m['artist'])
-        m_data["chorus"] = chorus or "⚠️ Refrão não encontrado."
+        m_data["chorus"] = chorus or "⚠️ Refrão não encontrado nesta fonte."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
@@ -181,9 +211,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await query.edit_message_text(
-            layout,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
+            layout, parse_mode=ParseMode.HTML, reply_markup=markup,
             link_preview_options=LinkPreviewOptions(is_disabled=not state["show_cover"])
         )
     except BadRequest: pass
@@ -200,16 +228,12 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
         music_cache[t_key] = {
             "val": {
-                "title": t["title"], 
-                "artist": t["artist"]["name"], 
-                "album": t["album"]["title"], 
-                "cover": t["album"]["cover_xl"] or t["album"]["cover_big"]
+                "title": t["title"], "artist": t["artist"]["name"], 
+                "album": t["album"]["title"], "cover": t["album"]["cover_xl"]
             },
-            "states": {}, 
-            "expires_at": time.time() + 1800
+            "states": {}, "expires_at": time.time() + 1800
         }
         
-        # O texto enviado inicialmente NÃO contém o link da imagem (comportamento idêntico ao chat)
         text_content = (
             f"🎹 {user_name} está ouvindo...\n\n"
             f"🎧 <b>{html.escape(t['title'])}</b>\n"
@@ -223,9 +247,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             description=f"Album: {t['album']['title']}",
             thumbnail_url=t["album"]["cover_small"],
             input_message_content=InputTextMessageContent(
-                text_content,
-                parse_mode=ParseMode.HTML,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
+                text_content, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True)
             ),
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🖼️ Cover", callback_data=f"c|{t_key}"),
