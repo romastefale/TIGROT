@@ -140,7 +140,7 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
 # =========================
 def get_chorus_via_openai(title: str, artist: str, openai_key: str | None) -> str:
     if not openai_key:
-        return "Erro: OPENAI_API_KEY não configurada."
+        return "❌ Erro: OPENAI_API_KEY não configurada."
     
     try:
         client = OpenAI(api_key=openai_key)
@@ -157,17 +157,18 @@ def get_chorus_via_openai(title: str, artist: str, openai_key: str | None) -> st
             temperature=0.2
         )
         content = resp.choices[0].message.content
-        return content.strip() if content else "Erro ao extrair o refrão."
+        return content.strip() if content else "⚠️ Erro ao extrair o refrão."
     except Exception as e:
         logger.error(f"Erro OpenAI: {e}")
-        return "Falha ao buscar a letra com a inteligência artificial."
+        return "⚠️ Falha ao buscar a letra com a inteligência artificial."
 
 # =========================
 # Utilitários de UX
 # =========================
 def get_final_markup(key: str, show_cover: bool, show_lyrics: bool) -> InlineKeyboardMarkup:
-    btn_cover = "✓ ❑ Cover" if show_cover else "❑ Cover"
-    btn_lyrics = "✓ ♩Lyrics" if show_lyrics else "♩Lyrics"
+    # UX: Adiciona um checkmark colorido ✅ se o toggle estiver ativo e muda o emoji principal
+    btn_cover = "✅ 🖼️ Cover" if show_cover else "🖼️ Cover"
+    btn_lyrics = "✅ 📜 Lyrics" if show_lyrics else "📜 Lyrics"
     
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(btn_cover, callback_data=f"c|{key}"),
@@ -191,9 +192,9 @@ async def safe_edit_message(query, text: str, markup: InlineKeyboardMarkup, disa
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "𝄢 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
-        "𝄞 Para usar, basta digitar o nome da música…\n\n"
-        "𝄡  Se quiser a letra do refrão só pedir!"
+        "🎶 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
+        "🎵 Para usar, basta digitar o nome da música…\n\n"
+        "📜 Se quiser a letra do refrão só pedir!"
     )
     await update.message.reply_text(msg)
 
@@ -211,11 +212,13 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btns = []
     for t in tracks:
         t_key = hashlib.md5(f"{t['deezer_url']}".encode()).hexdigest()[:8]
+        # Inicia o cache com um sub-dicionário de 'states' para gerenciar as mensagens
         music_cache[t_key] = {"val": t, "states": {}, "expires_at": get_now() + CACHE_TTL}
+        # Botões de busca simples sem emojis pra não poluir
         btns.append([InlineKeyboardButton(f"{t['title']} - {t['artist']}", callback_data=f"s|{t_key}")])
     
     markup = InlineKeyboardMarkup(btns)
-    await update.message.reply_text("♪ Escolha uma música...", reply_markup=markup)
+    await update.message.reply_text("🎵 Escolha uma música...", reply_markup=markup)
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -236,14 +239,15 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Usuário selecionou a música na lista
     if action == "s":
         markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✓ Sim", callback_data=f"y|{key}"),
-            InlineKeyboardButton("✕ Não", callback_data=f"n|{key}")
+            InlineKeyboardButton("✅ Sim", callback_data=f"y|{key}"),
+            InlineKeyboardButton("❌ Não", callback_data=f"n|{key}")
         ]])
-        await query.edit_message_text("♪ Letra?", reply_markup=markup)
+        await query.edit_message_text("📜 Letra?", reply_markup=markup)
 
     # 2. Usuário está nos controles finais (Toggle e escolhas iniciais)
     elif action in ("y", "n", "c", "l"):
         
+        # Garante que o estado dessa mensagem específica exista
         if message_id not in m_data["states"]:
             m_data["states"][message_id] = {
                 "show_cover": False,
@@ -254,41 +258,48 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = m_data["states"][message_id]
         user_name = state["user_name"]
 
+        # Atualiza os Toggles baseados no clique
         if action == "y":
             state["show_lyrics"] = True
         elif action == "n":
             state["show_lyrics"] = False
         elif action == "c":
-            state["show_cover"] = not state["show_cover"]
+            state["show_cover"] = not state["show_cover"] # Inverte o estado da Capa
         elif action == "l":
-            state["show_lyrics"] = not state["show_lyrics"]
+            state["show_lyrics"] = not state["show_lyrics"] # Inverte o estado da Letra
 
-        # Busca a letra direto na OpenAI caso necessário e ainda não tenha sido buscada
+        # Se precisa mostrar a letra e ainda não buscou, busca agora e salva globalmente pra faixa
         if state["show_lyrics"] and "chorus" not in m_data:
             await query.edit_message_text("🎧 Buscando refrão com IA...")
             st = context.application.bot_data["settings"]
             m_data["chorus"] = await asyncio.to_thread(get_chorus_via_openai, m['title'], m['artist'], st.openai_api_key)
 
-        # Montagem do Layout
+        # Constrói o layout de forma dinâmica complementando as opções
         layout = ""
         
+        # 1º Bloco: A Capa (Se ativo, joga o link invisível pra forçar o preview)
         if state["show_cover"]:
             layout += f'<a href="{m["cover"]}">&#8203;</a>'
             
+        # 2º Bloco: O cabeçalho e info da música
         layout += (
-            f"♫ {user_name} está ouvindo...\n\n"
-            f"♬ <b>{html.escape(m['title'])}</b>\n"
-            f"▶ <i>{html.escape(m['album'])}</i>\n"
-            f"★ <i>{html.escape(m['artist'])}</i>"
+            f"🎶 {user_name} está ouvindo...\n\n"
+            f"🎵 <b>{html.escape(m['title'])}</b>\n"
+            f"💿 <i>{html.escape(m['album'])}</i>\n"
+            f"🎤 <i>{html.escape(m['artist'])}</i>"
         )
 
+        # 3º Bloco: A Letra (Adiciona ao final se estiver ativo)
         if state["show_lyrics"]:
             layout += (
-                f"\n\n<i>♪ ♫ Lyrics:</i>\n\n"
+                f"\n\n<i>📜 Lyrics:</i>\n\n"
                 f"<blockquote>{html.escape(m_data['chorus'])}</blockquote>"
             )
 
+        # Monta os botões com seus estados coloridos atuais (✅ 🖼️ ou 📜)
         markup = get_final_markup(key, state["show_cover"], state["show_lyrics"])
+
+        # O preview do link deve ser DESATIVADO caso a capa não deva ser exibida.
         disable_preview = not state["show_cover"]
 
         await safe_edit_message(query, layout, markup, disable_preview)
