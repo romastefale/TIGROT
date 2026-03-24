@@ -1,70 +1,125 @@
-diff --git a/tests/test_pidrofmbot.py b/tests/test_pidrofmbot.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..09d1ee09fc4b5a533014c4773bed1955ac327dbe
---- /dev/null
-+++ b/tests/test_pidrofmbot.py
-@@ -0,0 +1,64 @@
-+import importlib
-+import os
-+import sys
-+from pathlib import Path
-+from unittest.mock import Mock, patch
-+
-+ROOT = Path(__file__).resolve().parents[1]
-+if str(ROOT) not in sys.path:
-+    sys.path.insert(0, str(ROOT))
-+
-+os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
-+
-+bot = importlib.import_module("pidrofmbot")
-+
-+
-+def test_escape_markdown():
-+    assert bot.escape_markdown("a_b*c[`") == r"a\_b\*c\[\`"
-+
-+
-+def test_normalize_query():
-+    assert bot.normalize_query("Daft---Punk__ Harder  Better") == "Daft Punk Harder Better"
-+
-+
-+def test_score_track_prefers_exact_title():
-+    track = {"title": "Hello", "artist": {"name": "Adele"}}
-+    assert bot.score_track(track, "hello") > 0
-+
-+
-+def test_cache_roundtrip():
-+    bot.cache.clear()
-+    bot.set_cache("demo", [{"title": "Song"}])
-+    assert bot.get_cache("demo") == [{"title": "Song"}]
-+
-+
-+def test_search_deezer_sync_success_uses_api_response():
-+    bot.cache.clear()
-+    fake_response = Mock()
-+    fake_response.status_code = 200
-+    fake_response.json.return_value = {
-+        "data": [
-+            {
-+                "title": "Hello",
-+                "artist": {"name": "Adele"},
-+                "album": {"title": "25", "cover_big": "https://example.com/cover.jpg"},
-+            }
-+        ]
-+    }
-+
-+    with patch.object(bot.session, "get", return_value=fake_response) as mocked_get:
-+        tracks = bot._search_deezer_sync("hello")
-+
-+    assert len(tracks) == 1
-+    mocked_get.assert_called_once()
-+
-+
-+def test_search_deezer_sync_returns_empty_on_non_200():
-+    bot.cache.clear()
-+    fake_response = Mock()
-+    fake_response.status_code = 500
-+
-+    with patch.object(bot.session, "get", return_value=fake_response):
-+        tracks = bot._search_deezer_sync("hello")
-+
-+    assert tracks == []
+import os
+import sys
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from telegram.ext import Application
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
+
+import pidrofmbot as bot
+
+
+def test_normalize_query():
+    assert bot.normalize_query("Daft---Punk__ Harder  Better") == "Daft Punk Harder Better"
+
+
+def test_score_track_prefers_exact_match():
+    track = {"title": "Hello", "artist": {"name": "Adele"}}
+    assert bot.score_track(track, "hello") > 0
+
+
+def test_normalize_webhook_url_adds_https():
+    assert bot._normalize_webhook_url("example.com/") == "https://example.com"
+
+
+def test_load_settings_auto_mode_webhook_when_url_present():
+    with patch.dict(
+        os.environ,
+        {
+            "TELEGRAM_TOKEN": "123:abc",
+            "RUN_MODE": "auto",
+            "WEBHOOK_URL": "pidrofmbot-v2-production.up.railway.app",
+        },
+        clear=False,
+    ):
+        settings = bot.load_settings()
+
+    assert settings.run_mode == "webhook"
+    assert settings.webhook_url == "https://pidrofmbot-v2-production.up.railway.app"
+
+
+def test_track_cache_roundtrip():
+    bot.selection_cache.clear()
+    key = bot.save_track({"title": "S", "artist": "A", "album": "B", "deezer_url": "x", "lyrics_url": ""})
+    assert bot.get_track(key)["title"] == "S"
+
+
+def test_search_session_roundtrip():
+    bot.search_sessions.clear()
+    sid = bot.save_search_session("hello", [{"title": "Hello"}])
+    assert bot.get_search_session(sid)["query"] == "hello"
+
+
+def test_search_deezer_sync_parses_payload():
+    fake = Mock()
+    fake.status_code = 200
+    fake.json.return_value = {
+        "data": [
+            {
+                "title": "Hello",
+                "artist": {"name": "Adele"},
+                "album": {"title": "25", "cover_big": "https://example.com/cover.jpg"},
+                "link": "https://deezer.example/hello",
+                "preview": "https://preview.example/hello.mp3",
+            }
+        ]
+    }
+
+    with patch.object(bot.http, "get", return_value=fake):
+        result = bot._search_deezer_sync("hello")
+
+    assert result[0]["title"] == "Hello"
+    assert result[0]["artist"] == "Adele"
+
+
+def test_fetch_lyrics_sync_fallback_lyrics_ovh():
+    track = {"title": "Hello", "artist": "Adele", "lyrics_url": ""}
+
+    genius_resp = Mock(status_code=404)
+    ovh_resp = Mock(status_code=200)
+    ovh_resp.json.return_value = {"lyrics": "line1\nline2"}
+
+    with patch.object(bot.http, "get", side_effect=[ovh_resp]):
+        lyrics, source = bot._fetch_lyrics_sync(track)
+
+    assert "line1" in lyrics
+    assert source == "lyrics.ovh"
+
+
+def test_build_application_registers_handlers():
+    settings = bot.Settings(
+        telegram_token="123:abc",
+        run_mode="polling",
+        webhook_url=None,
+        webhook_secret="secret",
+        port=8443,
+        genius_api_key=None,
+        openai_api_key=None,
+    )
+    app = bot.build_application(settings)
+
+    assert isinstance(app, Application)
+    assert app.handlers
+
+
+def test_run_webhook_path_calls_run_webhook():
+    settings = bot.Settings(
+        telegram_token="123:abc",
+        run_mode="webhook",
+        webhook_url="https://pidrofmbot-v2-production.up.railway.app",
+        webhook_secret="secret",
+        port=8443,
+        genius_api_key=None,
+        openai_api_key=None,
+    )
+
+    app = Mock()
+    with patch.object(bot, "build_application", return_value=app):
+        bot.run(settings)
+
+    app.run_webhook.assert_called_once()
