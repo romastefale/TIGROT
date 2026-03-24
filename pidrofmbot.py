@@ -14,9 +14,11 @@ from openai import OpenAI
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -120,13 +122,17 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
         data = sorted(data, key=lambda t: score_track(t, q), reverse=True)
         
         results = []
-        # Pega exatamente os 10 melhores
         for item in data[:SEARCH_MAX_RESULTS]:
+            album = item.get("album", {})
+            # Pega a capa na maior resolução possível (1000x1000)
+            cover = album.get("cover_xl") or album.get("cover_big") or album.get("cover")
+            
             results.append({
                 "title": item.get("title", "Unknown"),
                 "artist": item.get("artist", {}).get("name", "Unknown"),
-                "album": item.get("album", {}).get("title", "Single"),
-                "deezer_url": item.get("link", "")
+                "album": album.get("title", "Single"),
+                "deezer_url": item.get("link", ""),
+                "cover": cover
             })
         return results
     except Exception:
@@ -177,7 +183,36 @@ def extract_chorus(lyrics: str | None, openai_key: str | None) -> str:
     return "\n".join(best.splitlines()[:8])
 
 # =========================
-# Telegram Handlers (UX)
+# Utilitários de UX
+# =========================
+async def get_or_fetch_chorus(m: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
+    st = context.application.bot_data["settings"]
+    g_url = await asyncio.to_thread(get_genius_url, m['title'], m['artist'], st.genius_api_key)
+    lyrics = await asyncio.to_thread(fetch_lyrics, g_url)
+    chorus = await asyncio.to_thread(extract_chorus, lyrics, st.openai_api_key)
+    return chorus
+
+def get_final_markup(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❑ Cover", callback_data=f"c|{key}"),
+        InlineKeyboardButton("✎ Lyrics", callback_data=f"l|{key}")
+    ]])
+
+async def safe_edit_message(query, text: str, markup: InlineKeyboardMarkup, disable_preview: bool):
+    """Edita a mensagem ignorando o erro caso o usuário aperte o mesmo botão duas vezes."""
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=disable_preview)
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            logger.error(f"Erro ao editar mensagem: {e}")
+
+# =========================
+# Telegram Handlers
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
@@ -230,40 +265,50 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         await query.edit_message_text("♪ Letra?", reply_markup=markup)
 
-    # Usuário respondeu a pergunta da letra
-    elif action in ("y", "n"):
+    # Fluxo principal de visualização da música (Ações: y, n, c, l)
+    elif action in ("y", "n", "c", "l"):
         
-        # Pega o primeiro nome de quem clicou no botão
-        user_name = html.escape(query.from_user.first_name)
+        # Registra o nome do usuário que iniciou a ação na primeira vez
+        if "user_name" not in m_data:
+            m_data["user_name"] = html.escape(query.from_user.first_name)
+        user_name = m_data["user_name"]
 
-        # Base do layout (comum para as duas escolhas)
-        base_layout = (
-            f"♫ {user_name} está ouvindo...\n\n"
+        base_info = (
             f"♬ <b>{html.escape(m['title'])}</b>\n"
             f"▶ <i>{html.escape(m['album'])}</i>\n"
             f"★ <i>{html.escape(m['artist'])}</i>"
         )
 
-        if action == "n":
-            # Usuário não quer a letra, manda só o cabeçalho
-            await query.edit_message_text(base_layout, parse_mode=ParseMode.HTML)
-            return
+        markup = get_final_markup(key)
 
-        # Se for "y", avisa que está buscando a letra
-        await query.edit_message_text("🎧 Buscando refrão...")
-        st = context.application.bot_data["settings"]
-        
-        g_url = await asyncio.to_thread(get_genius_url, m['title'], m['artist'], st.genius_api_key)
-        lyrics = await asyncio.to_thread(fetch_lyrics, g_url)
-        chorus = await asyncio.to_thread(extract_chorus, lyrics, st.openai_api_key)
-        
-        final_layout = (
-            f"{base_layout}\n\n"
-            f"<i>♪ ♫ Lyrics:</i>\n\n"
-            f"<blockquote>{html.escape(chorus)}</blockquote>"
-        )
-        
-        await query.edit_message_text(final_layout, parse_mode=ParseMode.HTML)
+        # Ação: Visualizar Letra / Sim, quero letra inicial
+        if action == "y" or action == "l":
+            if "chorus" not in m_data:
+                await query.edit_message_text("🎧 Buscando refrão...")
+                m_data["chorus"] = await get_or_fetch_chorus(m, context)
+            
+            layout = (
+                f"♫ {user_name} está ouvindo...\n\n"
+                f"{base_info}\n\n"
+                f"<i>♪ ♫ Lyrics:</i>\n\n"
+                f"<blockquote>{html.escape(m_data['chorus'])}</blockquote>"
+            )
+            await safe_edit_message(query, layout, markup, disable_preview=True)
+
+        # Ação: Não quer letra inicial (vai direto pro Base)
+        elif action == "n":
+            layout = f"♫ {user_name} está ouvindo...\n\n{base_info}"
+            await safe_edit_message(query, layout, markup, disable_preview=True)
+
+        # Ação: Visualizar Capa (Cover)
+        elif action == "c":
+            # O link invisível na tag <a> aciona o Link Preview do Telegram com a capa em alta resolução
+            layout = (
+                f'<a href="{m["cover"]}">&#8203;</a>'
+                f"♫ {user_name} está ouvindo...\n\n"
+                f"{base_info}"
+            )
+            await safe_edit_message(query, layout, markup, disable_preview=False)
 
 async def post_init(app: Application):
     me = await app.bot.get_me()
@@ -278,7 +323,6 @@ def main():
     app.bot_data["settings"] = st
 
     app.add_handler(CommandHandler("start", cmd_start))
-    # Handler para pegar qualquer texto digitado (busca)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
     app.add_handler(CallbackQueryHandler(cb_handler))
 
