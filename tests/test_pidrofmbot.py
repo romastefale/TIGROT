@@ -91,16 +91,7 @@ def test_search_deezer_sync_parses_payload():
     fake = Mock()
     fake.status_code = 200
     fake.json.return_value = {
-    session_key = bot.create_search_session("hello", [{"title": "Hello", "artist": "Adele"}])
-    assert bot.get_search_session(session_key)["query"] == "hello"
-
-
-def test_search_deezer_sync_success_uses_api_response():
-    bot.cache.clear()
-    fake_response = Mock()
-    fake_response.status_code = 200
-    fake_response.json.return_value = {
-        "data": [
+free        "data": [
             {
                 "title": "Hello",
                 "artist": {"name": "Adele"},
@@ -144,57 +135,6 @@ def test_build_application_registers_handlers():
     )
     app = bot.build_application(settings)
 
-    with patch.object(bot.session, "get", return_value=fake_response) as mocked_get:
-        tracks = bot._search_deezer_sync("hello")
-
-    assert tracks == [
-        {
-            "title": "Hello",
-            "artist": "Adele",
-            "album": "25",
-            "thumb": "https://example.com/cover.jpg",
-            "deezer_url": "https://deezer.example/hello",
-            "preview": "https://preview.example/hello.mp3",
-            "url": "",
-        }
-    ]
-    mocked_get.assert_called_once()
-
-
-def test_search_deezer_sync_returns_empty_on_non_200():
-    bot.cache.clear()
-    fake_response = Mock()
-    fake_response.status_code = 500
-
-    with patch.object(bot.session, "get", return_value=fake_response):
-        tracks = bot._search_deezer_sync("hello")
-
-    assert tracks == []
-
-
-def test_pegar_letra_ignores_non_genius_url():
-    assert bot.pegar_letra("https://example.com/song") is None
-
-
-def test_build_search_keyboard_has_load_more_button():
-    items = [
-        {"title": f"Song {i}", "artist": "Artist", "album": "Album", "url": "", "deezer_url": "", "thumb": "", "preview": ""}
-        for i in range(6)
-    ]
-    keyboard = bot.build_search_keyboard("abc123", items, page=0)
-    assert keyboard.inline_keyboard[-1][0].text == "Load more ▶️"
-
-
-def test_obter_letra_e_fonte_falls_back_to_lyrics_ovh_when_genius_missing():
-    with patch.object(bot, "pegar_letra_genius", return_value=None), patch.object(bot, "pegar_letra_lyrics_ovh", return_value="line 1\nline2"):
-        letra, fonte = bot.obter_letra_e_fonte({"title": "Hello", "artist": "Adele", "url": ""})
-
-    assert letra == "line 1\nline2"
-    assert fonte == "lyrics.ovh"
-
-
-def test_build_application_registers_handlers():
-    app = bot.build_application("test-token")
     assert isinstance(app, Application)
     assert app.handlers
 

@@ -9,6 +9,11 @@ Bot do Telegram focado em UX simples:
 ---
 
 ## Funcionalidades
+
+
+---
+
+## Funcionalidades
 Bot do Telegram para buscar músicas, navegar entre resultados e compartilhar informações da faixa com capa, preview e refrão quando disponível.
 
 ## O que o bot faz
@@ -29,6 +34,7 @@ Bot do Telegram para buscar músicas, navegar entre resultados e compartilhar in
 - Modo inline do Telegram.
 - Execução em `polling` ou `webhook`.
 
+---
 - Python 3.10+
 - Token do bot do Telegram
 
@@ -56,11 +62,25 @@ pip install -r requirements.txt
 
 ---
 
+
+> O bot carrega `.env` automaticamente se o arquivo existir.
+
+---
+
 ## Rodar local
 
 ```bash
 python main.py
 ```
+
+- `RUN_MODE=auto` usa webhook se `WEBHOOK_URL` existir, senão polling.
+- Em Railway, prefira webhook para evitar `409 Conflict`.
+
+---
+
+## Railway (seu caso)
+
+Use no ambiente da Railway:
 
 Variáveis principais:
 
@@ -132,6 +152,20 @@ curl -X POST "https://api.telegram.org/botSEU_TOKEN/setWebhook" \
 ```
 
 Conferir status webhook:
+
+```bash
+curl "https://api.telegram.org/botSEU_TOKEN/getWebhookInfo"
+```
+
+---
+
+## Comandos do bot
+
+- `/start`
+- `/help`
+- `/music <termo>`
+
+---
 
 ```bash
 curl "https://api.telegram.org/botSEU_TOKEN/getWebhookInfo"
