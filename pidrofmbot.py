@@ -11,7 +11,8 @@ from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
-    InlineQueryResultPhoto,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     LinkPreviewOptions
@@ -69,27 +70,20 @@ def get_chorus_via_scraping(title, artist):
         url = f"https://www.letras.mus.br/{slugify(artist)}/{slugify(title)}/"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = session.get(url, headers=headers, timeout=5)
-
         if response.status_code != 200: return None
 
         soup = BeautifulSoup(response.text, 'html.parser')
         lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
-        
         if not lyrics_div: return None
 
-        for br in lyrics_div.find_all("br"):
-            br.replace_with("\n")
-        
+        for br in lyrics_div.find_all("br"): br.replace_with("\n")
         full_text = lyrics_div.get_text("\n")
         parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:)', full_text, flags=re.IGNORECASE)
         
-        if len(parts) > 1:
-            return parts[2].strip().split('\n\n')[0]
-        
+        if len(parts) > 1: return parts[2].strip().split('\n\n')[0]
         lines = [line.strip() for line in full_text.split('\n') if line.strip()]
         return "\n".join(lines[:5]) + "..."
-    except Exception:
-        return None
+    except Exception: return None
 
 # =========================
 # LÓGICA DE BUSCA DEEZER
@@ -99,8 +93,7 @@ def search_deezer_sync(query):
     try:
         r = session.get("https://api.deezer.com/search", params={"q": query, "limit": 10}, timeout=5)
         return r.json().get("data", []) if r.status_code == 200 else []
-    except Exception:
-        return []
+    except Exception: return []
 
 # =========================
 # HANDLERS
@@ -216,21 +209,24 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "expires_at": time.time() + 1800
         }
         
-        # Layout idêntico ao do chat privado
-        caption = (
+        # O texto enviado inicialmente NÃO contém o link da imagem (comportamento idêntico ao chat)
+        text_content = (
             f"🎹 {user_name} está ouvindo...\n\n"
             f"🎧 <b>{html.escape(t['title'])}</b>\n"
             f"💿 <i>{html.escape(t['album']['title'])}</i>\n"
             f"🎤 <i>{html.escape(t['artist']['name'])}</i>"
         )
 
-        results.append(InlineQueryResultPhoto(
-            id=f"{t_key}_{i}", 
-            photo_url=t["album"]["cover_big"], 
-            thumbnail_url=t["album"]["cover_small"],
+        results.append(InlineQueryResultArticle(
+            id=f"{t_key}_{i}",
             title=f"{t['title']} — {t['artist']['name']}",
-            caption=caption,
-            parse_mode=ParseMode.HTML,
+            description=f"Album: {t['album']['title']}",
+            thumbnail_url=t["album"]["cover_small"],
+            input_message_content=InputTextMessageContent(
+                text_content,
+                parse_mode=ParseMode.HTML,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            ),
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🖼️ Cover", callback_data=f"c|{t_key}"),
                 InlineKeyboardButton("📜 Lyrics", callback_data=f"l|{t_key}")
@@ -244,7 +240,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not TOKEN: return
     app = Application.builder().token(TOKEN).build()
-    
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
