@@ -54,67 +54,77 @@ music_cache = {}
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # =========================
-# LÓGICA DE LETRAS (5 VERSOS ALEATÓRIOS)
+# LÓGICA DE LETRAS (3 FONTES + 5 VERSOS)
 # =========================
 def get_chorus_via_scraping(title, artist):
-    """Busca a letra e seleciona 5 versos consecutivos aleatórios."""
-    try:
-        def clean_name(text):
-            text = re.sub(r'[\(\[][Ff]eat\.?.*[\)\]]', '', text)
-            text = re.sub(r'[\(\[][Rr]emix.*[\)\]]', '', text)
-            text = re.sub(r'[\(\[].*[\)\]]', '', text)
-            text = text.split(' - ')[0]
-            return text.strip()
+    """Tenta obter a letra em 3 fontes diferentes e extrai 5 versos aleatórios."""
+    
+    def clean_name(text):
+        text = re.sub(r'[\(\[][Ff]eat\.?.*[\)\]]', '', text)
+        text = re.sub(r'[\(\[][Rr]emix.*[\)\]]', '', text)
+        text = re.sub(r'[\(\[].*[\)\]]', '', text)
+        text = text.split(' - ')[0]
+        return text.strip()
 
-        def slugify(text):
-            text = clean_name(text).lower()
-            text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-            text = re.sub(r'[^a-z0-9]', '-', text)
-            return text.strip('-')
+    def slugify(text, sep='-'):
+        text = clean_name(text).lower()
+        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+        text = re.sub(r'[^a-z0-9]', sep, text)
+        return text.strip(sep)
 
-        slug_artist = slugify(artist)
-        slug_title = slugify(title)
+    def extract_random_verses(html_content, selectors):
+        soup = BeautifulSoup(html_content, 'html.parser')
+        lyrics_div = None
+        for sel in selectors:
+            lyrics_div = soup.select_one(sel)
+            if lyrics_div: break
         
-        url = f"https://www.letras.mus.br/{slug_artist}/{slug_title}/"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = session.get(url, headers=headers, timeout=5)
-        
-        if response.status_code != 200:
-            return None
+        if not lyrics_div: return None
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        lyrics_div = soup.find('div', class_='lyric-canv') or soup.find('div', class_='cnt-letra')
-        
-        if not lyrics_div:
-            return None
-
-        for br in lyrics_div.find_all("br"):
-            br.replace_with("\n")
-        
-        # Limpa a letra: remove tags como [Refrão] e linhas vazias
-        full_text = lyrics_div.get_text("\n")
+        for br in lyrics_div.find_all("br"): br.replace_with("\n")
         lines = [
-            line.strip() for line in full_text.split('\n') 
-            if line.strip() and not line.startswith('[') and not line.endswith(':')
+            l.strip() for l in lyrics_div.get_text("\n").split('\n') 
+            if l.strip() and not l.startswith('[') and not l.endswith(':')
         ]
-
-        if not lines:
-            return None
-
-        # Se a música for muito curta, envia o que tiver
-        num_verses = 5
-        if len(lines) <= num_verses:
-            return "\n".join(lines)
-
-        # Escolhe um ponto de partida aleatório para pegar 5 versos consecutivos
-        start_index = random.randint(0, len(lines) - num_verses)
-        selected_snippet = lines[start_index : start_index + num_verses]
         
-        return "\n".join(selected_snippet)
+        if not lines: return None
+        num = 5
+        if len(lines) <= num: return "\n".join(lines)
+        start = random.randint(0, len(lines) - num)
+        return "\n".join(lines[start : start + num])
 
-    except Exception as e:
-        logger.error(f"Erro no scraping: {e}")
-        return None
+    # Configuração das 3 fontes
+    s_artist = slugify(artist)
+    s_title = slugify(title)
+    
+    sources = [
+        {
+            "url": f"https://www.letras.mus.br/{s_artist}/{s_title}/",
+            "selectors": [".lyric-canv", ".cnt-letra"]
+        },
+        {
+            "url": f"https://www.vagalume.com.br/{s_artist}/{s_title}/",
+            "selectors": ["#lyrics"]
+        },
+        {
+            "url": f"https://genius.com/{slugify(artist, sep='-').capitalize()}-{slugify(title, sep='-')}-lyrics",
+            "selectors": ["[class^='Lyrics__Container']", ".lyrics"]
+        }
+    ]
+
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+    for source in sources:
+        try:
+            resp = session.get(source["url"], headers=headers, timeout=5)
+            if resp.status_code == 200:
+                snippet = extract_random_verses(resp.text, source["selectors"])
+                if snippet: return snippet
+        except Exception as e:
+            logger.error(f"Erro na fonte {source['url']}: {e}")
+            continue
+
+    return None
 
 # =========================
 # LÓGICA DE BUSCA DEEZER
@@ -189,7 +199,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state["show_lyrics"] and "chorus" not in m_data:
         loop = asyncio.get_event_loop()
         chorus = await loop.run_in_executor(_executor, get_chorus_via_scraping, m['title'], m['artist'])
-        m_data["chorus"] = chorus or "⚠️ Trecho da letra não disponível no momento."
+        m_data["chorus"] = chorus or "⚠️ Trecho da letra não disponível em nenhuma das fontes."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
