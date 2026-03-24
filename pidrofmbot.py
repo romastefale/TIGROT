@@ -124,7 +124,6 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
         results = []
         for item in data[:SEARCH_MAX_RESULTS]:
             album = item.get("album", {})
-            # Pega a capa na maior resolução possível (1000x1000)
             cover = album.get("cover_xl") or album.get("cover_big") or album.get("cover")
             
             results.append({
@@ -176,7 +175,6 @@ def extract_chorus(lyrics: str | None, openai_key: str | None) -> str:
             return content.strip() if content else "Erro ao extrair o refrão."
         except: pass
 
-    # Heurística local de segurança
     blocks = [b.strip() for b in re.split(r"\n\s*\n", lyrics) if b.strip()]
     if not blocks: return "Não foi possível extrair."
     best = max(blocks, key=lambda b: (blocks.count(b), len(b)))
@@ -192,14 +190,17 @@ async def get_or_fetch_chorus(m: dict, context: ContextTypes.DEFAULT_TYPE) -> st
     chorus = await asyncio.to_thread(extract_chorus, lyrics, st.openai_api_key)
     return chorus
 
-def get_final_markup(key: str) -> InlineKeyboardMarkup:
+def get_final_markup(key: str, show_cover: bool, show_lyrics: bool) -> InlineKeyboardMarkup:
+    # UX: Adiciona um checkmark ✓ minimalista se o toggle estiver ativo
+    btn_cover = "✓ ❑ Cover" if show_cover else "❑ Cover"
+    btn_lyrics = "✓ ♩Lyrics" if show_lyrics else "♩Lyrics"
+    
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("❑ Cover", callback_data=f"c|{key}"),
-        InlineKeyboardButton("✎ Lyrics", callback_data=f"l|{key}")
+        InlineKeyboardButton(btn_cover, callback_data=f"c|{key}"),
+        InlineKeyboardButton(btn_lyrics, callback_data=f"l|{key}")
     ]])
 
 async def safe_edit_message(query, text: str, markup: InlineKeyboardMarkup, disable_preview: bool):
-    """Edita a mensagem ignorando o erro caso o usuário aperte o mesmo botão duas vezes."""
     try:
         await query.edit_message_text(
             text,
@@ -236,7 +237,8 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btns = []
     for t in tracks:
         t_key = hashlib.md5(f"{t['deezer_url']}".encode()).hexdigest()[:8]
-        music_cache[t_key] = {"val": t, "expires_at": get_now() + CACHE_TTL}
+        # Inicia o cache com um sub-dicionário de 'states' para gerenciar as mensagens
+        music_cache[t_key] = {"val": t, "states": {}, "expires_at": get_now() + CACHE_TTL}
         btns.append([InlineKeyboardButton(f"{t['title']} - {t['artist']}", callback_data=f"s|{t_key}")])
     
     markup = InlineKeyboardMarkup(btns)
@@ -256,8 +258,9 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     m = m_data["val"]
+    message_id = str(query.message.message_id)
 
-    # Usuário selecionou a música na lista
+    # 1. Usuário selecionou a música na lista
     if action == "s":
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("✓ Sim", callback_data=f"y|{key}"),
@@ -265,50 +268,64 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         await query.edit_message_text("♪ Letra?", reply_markup=markup)
 
-    # Fluxo principal de visualização da música (Ações: y, n, c, l)
+    # 2. Usuário está nos controles finais (Toggle e escolhas iniciais)
     elif action in ("y", "n", "c", "l"):
         
-        # Registra o nome do usuário que iniciou a ação na primeira vez
-        if "user_name" not in m_data:
-            m_data["user_name"] = html.escape(query.from_user.first_name)
-        user_name = m_data["user_name"]
+        # Garante que o estado dessa mensagem específica exista
+        if message_id not in m_data["states"]:
+            m_data["states"][message_id] = {
+                "show_cover": False,
+                "show_lyrics": False,
+                "user_name": html.escape(query.from_user.first_name)
+            }
+        
+        state = m_data["states"][message_id]
+        user_name = state["user_name"]
 
-        base_info = (
+        # Atualiza os Toggles baseados no clique
+        if action == "y":
+            state["show_lyrics"] = True
+        elif action == "n":
+            state["show_lyrics"] = False
+        elif action == "c":
+            state["show_cover"] = not state["show_cover"] # Inverte o estado da Capa
+        elif action == "l":
+            state["show_lyrics"] = not state["show_lyrics"] # Inverte o estado da Letra
+
+        # Se precisa mostrar a letra e ainda não buscou, busca agora e salva globalmente pra faixa
+        if state["show_lyrics"] and "chorus" not in m_data:
+            await query.edit_message_text("🎧 Buscando refrão...")
+            m_data["chorus"] = await get_or_fetch_chorus(m, context)
+
+        # Constrói o layout de forma dinâmica complementando as opções
+        layout = ""
+        
+        # 1º Bloco: A Capa (Se ativo, joga o link invisível)
+        if state["show_cover"]:
+            layout += f'<a href="{m["cover"]}">&#8203;</a>'
+            
+        # 2º Bloco: O cabeçalho e info da música
+        layout += (
+            f"♫ {user_name} está ouvindo...\n\n"
             f"♬ <b>{html.escape(m['title'])}</b>\n"
             f"▶ <i>{html.escape(m['album'])}</i>\n"
             f"★ <i>{html.escape(m['artist'])}</i>"
         )
 
-        markup = get_final_markup(key)
-
-        # Ação: Visualizar Letra / Sim, quero letra inicial
-        if action == "y" or action == "l":
-            if "chorus" not in m_data:
-                await query.edit_message_text("🎧 Buscando refrão...")
-                m_data["chorus"] = await get_or_fetch_chorus(m, context)
-            
-            layout = (
-                f"♫ {user_name} está ouvindo...\n\n"
-                f"{base_info}\n\n"
-                f"<i>♪ ♫ Lyrics:</i>\n\n"
+        # 3º Bloco: A Letra (Adiciona ao final se estiver ativo)
+        if state["show_lyrics"]:
+            layout += (
+                f"\n\n<i>♪ ♫ Lyrics:</i>\n\n"
                 f"<blockquote>{html.escape(m_data['chorus'])}</blockquote>"
             )
-            await safe_edit_message(query, layout, markup, disable_preview=True)
 
-        # Ação: Não quer letra inicial (vai direto pro Base)
-        elif action == "n":
-            layout = f"♫ {user_name} está ouvindo...\n\n{base_info}"
-            await safe_edit_message(query, layout, markup, disable_preview=True)
+        # Monta os botões com seus estados atuais (✓ ou não)
+        markup = get_final_markup(key, state["show_cover"], state["show_lyrics"])
 
-        # Ação: Visualizar Capa (Cover)
-        elif action == "c":
-            # O link invisível na tag <a> aciona o Link Preview do Telegram com a capa em alta resolução
-            layout = (
-                f'<a href="{m["cover"]}">&#8203;</a>'
-                f"♫ {user_name} está ouvindo...\n\n"
-                f"{base_info}"
-            )
-            await safe_edit_message(query, layout, markup, disable_preview=False)
+        # O preview do link deve ser DESATIVADO caso a capa não deva ser exibida.
+        disable_preview = not state["show_cover"]
+
+        await safe_edit_message(query, layout, markup, disable_preview)
 
 async def post_init(app: Application):
     me = await app.bot.get_me()
