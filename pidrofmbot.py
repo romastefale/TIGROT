@@ -22,6 +22,7 @@ from telegram.ext import (
     Application,
     InlineQueryHandler,
     MessageHandler,
+    CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
     filters
@@ -50,13 +51,14 @@ music_cache = {}
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # =========================
-# LÓGICA DE SCRAPING (SEM API)
+# LÓGICA DE LETRAS (SCRAPING)
 # =========================
 def get_chorus_via_scraping(title, artist):
     """Busca a letra no Letras.mus.br e tenta extrair o refrão."""
     try:
         def slugify(text):
             text = text.lower()
+            # Remove acentos básicos
             text = re.sub(r'[àáâãäå]', 'a', text)
             text = re.sub(r'[èéêë]', 'e', text)
             text = re.sub(r'[ìíîï]', 'i', text)
@@ -66,9 +68,7 @@ def get_chorus_via_scraping(title, artist):
             text = re.sub(r'[^a-z0-9]', '-', text)
             return text.strip('-')
 
-        # Monta a URL provável
         url = f"https://www.letras.mus.br/{slugify(artist)}/{slugify(title)}/"
-        
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = session.get(url, headers=headers, timeout=5)
 
@@ -81,120 +81,83 @@ def get_chorus_via_scraping(title, artist):
         if not lyrics_div:
             return None
 
-        # Preserva quebras de linha
         for br in lyrics_div.find_all("br"):
             br.replace_with("\n")
         
         full_text = lyrics_div.get_text("\n")
-
-        # Busca bloco de refrão por tags comuns [Refrão], [Chorus] ou (Refrão)
         parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:)', full_text, flags=re.IGNORECASE)
         
         if len(parts) > 1:
-            # O conteúdo do refrão geralmente vem após o marcador
-            chorus = parts[2].strip().split('\n\n')[0]
-            return chorus
+            return parts[2].strip().split('\n\n')[0]
         
-        # Fallback: Se não achar tag de refrão, pega as primeiras 5 linhas
         lines = [line.strip() for line in full_text.split('\n') if line.strip()]
         return "\n".join(lines[:5]) + "..."
-
-    except Exception as e:
-        logger.error(f"Erro no scraping: {e}")
+    except Exception:
         return None
 
 # =========================
 # LÓGICA DE BUSCA DEEZER
 # =========================
-def score_track(track, query):
-    title = track.get("title", "").lower()
-    artist = track.get("artist", {}).get("name", "").lower()
-    q = query.lower()
-    score = 0
-    if q in f"{title} {artist}": score += 100
-    if q in title: score += 60
-    return score
-
-def _search_deezer_sync(query):
+def search_deezer_sync(query):
     query = re.sub(r"[-_]+", " ", query).strip()
     try:
-        r = session.get("https://api.deezer.com/search", params={"q": query, "limit": 15}, timeout=5)
-        if r.status_code != 200: return []
-        tracks = r.json().get("data", [])
-        return sorted(tracks, key=lambda t: score_track(t, query), reverse=True)
+        r = session.get("https://api.deezer.com/search", params={"q": query, "limit": 10}, timeout=5)
+        return r.json().get("data", []) if r.status_code == 200 else []
     except Exception:
         return []
-
-async def search_deezer(query):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, _search_deezer_sync, query)
-
-# =========================
-# HELPERS DE UI
-# =========================
-def get_final_markup(key, show_cover, show_lyrics):
-    btn_cover = "✅ 🖼️ Cover" if show_cover else "🖼️ Cover"
-    btn_lyrics = "✅ 📜 Lyrics" if show_lyrics else "📜 Lyrics"
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(btn_cover, callback_data=f"c|{key}"),
-        InlineKeyboardButton(btn_lyrics, callback_data=f"l|{key}")
-    ]])
 
 # =========================
 # HANDLERS
 # =========================
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query
-    if not query: return
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /start personalizado."""
+    msg = (
+        "🎹 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
+        "🎧 Para usar, basta digitar o nome da música…\n\n"
+        "📜 Se quiser a letra do refrão só pedir!"
+    )
+    await update.message.reply_text(msg)
 
-    tracks = await search_deezer(query)
-    user_name = html.escape(update.inline_query.from_user.first_name)
-    results = []
+async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Busca disparada ao enviar texto no chat privado."""
+    query = update.message.text
+    loop = asyncio.get_event_loop()
+    tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
+    
+    if not tracks:
+        await update.message.reply_text("❌ Nenhuma música encontrada.")
+        return
 
-    for i, track in enumerate(tracks[:10]):
-        try:
-            t_key = hashlib.md5(track["link"].encode()).hexdigest()[:8]
-            music_cache[t_key] = {
-                "val": {
-                    "title": track["title"],
-                    "artist": track["artist"]["name"],
-                    "album": track["album"]["title"],
-                    "cover": track["album"]["cover_xl"] or track["album"]["cover_big"],
-                },
-                "states": {},
-                "expires_at": time.time() + 1800
-            }
-
-            results.append(
-                InlineQueryResultPhoto(
-                    id=f"{t_key}_{i}",
-                    photo_url=track["album"]["cover_big"],
-                    thumbnail_url=track["album"]["cover_small"],
-                    title=f"{track['title']} — {track['artist']['name']}",
-                    caption=(
-                        f"🎹 {user_name} está ouvindo...\n\n"
-                        f"🎧 <b>{html.escape(track['title'])}</b>\n"
-                        f"💿 <i>{html.escape(track['album']['title'])}</i>\n"
-                        f"🎤 <i>{html.escape(track['artist']['name'])}</i>"
-                    ),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_final_markup(t_key, False, False)
-                )
-            )
-        except Exception: continue
-
-    await update.inline_query.answer(results, cache_time=5)
+    btns = []
+    for t in tracks[:8]:
+        t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
+        music_cache[t_key] = {
+            "val": {
+                "title": t["title"],
+                "artist": t["artist"]["name"],
+                "album": t["album"]["title"],
+                "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
+            },
+            "states": {},
+            "expires_at": time.time() + 1800
+        }
+        btns.append([InlineKeyboardButton(f"{t['title']} — {t['artist']['name']}", callback_data=f"s|{t_key}")])
+    
+    await update.message.reply_text("🎧 Escolha uma música...", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gerencia cliques nos botões (Capa, Letra e Seleção)."""
     query = update.callback_query
     await query.answer()
     
     parts = query.data.split("|")
-    if len(parts) < 2: return
     action, key = parts[0], parts[1]
 
     m_data = music_cache.get(key)
-    if not m_data: return
+    if not m_data:
+        try: await query.edit_message_text("❌ Erro: Sessão expirada.")
+        except: pass
+        return
         
     m = m_data["val"]
     msg_id = str(query.message.message_id) if query.message else query.inline_message_id
@@ -210,12 +173,10 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "c": state["show_cover"] = not state["show_cover"]
     elif action == "l": state["show_lyrics"] = not state["show_lyrics"]
 
-    # Busca a letra apenas se o botão for clicado e não estiver no cache
     if state["show_lyrics"] and "chorus" not in m_data:
-        # Executa o scraping em uma thread separada para não travar o bot
         loop = asyncio.get_event_loop()
         chorus = await loop.run_in_executor(_executor, get_chorus_via_scraping, m['title'], m['artist'])
-        m_data["chorus"] = chorus or "⚠️ Refrão não encontrado automaticamente."
+        m_data["chorus"] = chorus or "⚠️ Refrão não encontrado."
 
     layout = ""
     if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
@@ -228,52 +189,57 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if state["show_lyrics"]:
-        lyrics = m_data.get("chorus", "⚠️ Carregando...")
-        layout += f"\n\n<i>📜 Refrão:</i>\n\n<blockquote>{html.escape(lyrics)}</blockquote>"
+        layout += f"\n\n<i>📜 Lyrics:</i>\n\n<blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
+
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 🖼️ Cover" if state["show_cover"] else "🖼️ Cover", callback_data=f"c|{key}"),
+        InlineKeyboardButton("✅ 📜 Lyrics" if state["show_lyrics"] else "📜 Lyrics", callback_data=f"l|{key}")
+    ]])
 
     try:
         await query.edit_message_text(
             layout,
             parse_mode=ParseMode.HTML,
-            reply_markup=get_final_markup(key, state["show_cover"], state["show_lyrics"]),
+            reply_markup=markup,
             link_preview_options=LinkPreviewOptions(is_disabled=not state["show_cover"])
         )
     except BadRequest: pass
 
-async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
-    tracks = await search_deezer(query)
-    if not tracks:
-        await update.message.reply_text("❌ Nenhuma música encontrada.")
-        return
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Modo inline: @seu_bot nome_da_musica."""
+    query = update.inline_query.query
+    if not query: return
+    loop = asyncio.get_event_loop()
+    tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
+    user_name = html.escape(update.inline_query.from_user.first_name)
+    results = []
 
-    keyboard = []
-    for t in tracks[:8]:
+    for i, t in enumerate(tracks[:10]):
         t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
         music_cache[t_key] = {
-            "val": {
-                "title": t["title"],
-                "artist": t["artist"]["name"],
-                "album": t["album"]["title"],
-                "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
-            },
-            "states": {},
-            "expires_at": time.time() + 1800
+            "val": {"title": t["title"], "artist": t["artist"]["name"], "album": t["album"]["title"], "cover": t["album"]["cover_xl"]},
+            "states": {}, "expires_at": time.time() + 1800
         }
-        keyboard.append([InlineKeyboardButton(f"{t['title']} — {t['artist']['name']}", callback_data=f"l|{t_key}")])
+        results.append(InlineQueryResultPhoto(
+            id=f"{t_key}_{i}", photo_url=t["album"]["cover_big"], thumbnail_url=t["album"]["cover_small"],
+            title=f"{t['title']} — {t['artist']['name']}",
+            caption=f"🎹 {user_name} está ouvindo...\n\n🎧 <b>{html.escape(t['title'])}</b>\n🎤 <i>{html.escape(t['artist']['name'])}</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🖼️ Cover", callback_data=f"c|{t_key}"), InlineKeyboardButton("📜 Lyrics", callback_data=f"l|{t_key}")]])
+        ))
+    await update.inline_query.answer(results, cache_time=5)
 
-    await update.message.reply_text("🎧 Escolha uma música para exibir o card:", reply_markup=InlineKeyboardMarkup(keyboard))
-
+# =========================
+# MAIN
+# =========================
 def main():
-    if not TOKEN:
-        print("Erro: TELEGRAM_TOKEN não definido!")
-        return
-
+    if not TOKEN: return logger.error("TELEGRAM_TOKEN faltando!")
     app = Application.builder().token(TOKEN).build()
     
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(InlineQueryHandler(inline_query))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
-    app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^(c|l)\|"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
+    app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^(c|l|s)\|"))
 
     if WEBHOOK_URL:
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN,
