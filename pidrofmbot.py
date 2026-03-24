@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
-from bs4 import BeautifulSoup
 from openai import OpenAI
 from telegram import (
     InlineKeyboardButton,
@@ -43,7 +42,6 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class Settings:
     token: str
-    genius_api_key: str | None
     openai_api_key: str | None
     webhook_url: str | None
     webhook_secret: str | None
@@ -70,7 +68,6 @@ def load_settings() -> Settings:
 
     return Settings(
         token=token,
-        genius_api_key=os.getenv("GENIUS_API_KEY"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         webhook_url=webhook_url,
         webhook_secret=secret,
@@ -96,7 +93,7 @@ def cleanup_cache():
         music_cache.pop(k, None)
 
 # =========================
-# Lógica de Busca e Letras
+# Lógica de Busca (Deezer)
 # =========================
 def normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[_\-]+", " ", query or "")).strip()
@@ -138,60 +135,37 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
         logger.exception("Erro Deezer")
         return []
 
-def get_genius_url(title: str, artist: str, api_key: str | None) -> str | None:
-    if not api_key: return None
-    try:
-        resp = session.get("https://api.genius.com/search", 
-                           headers={"Authorization": f"Bearer {api_key}"},
-                           params={"q": f"{title} {artist}"}, timeout=10)
-        hits = resp.json().get("response", {}).get("hits", [])
-        return hits[0]["result"]["url"] if hits else None
-    except: return None
-
-def fetch_lyrics(genius_url: str | None) -> str | None:
-    if not genius_url or "genius.com" not in genius_url: return None
-    try:
-        resp = session.get(genius_url, timeout=10)
-        soup = BeautifulSoup(resp.text, "lxml")
-        containers = soup.find_all("div", {"data-lyrics-container": "true"})
-        return "\n".join([c.get_text("\n") for c in containers]).strip()
-    except: return None
-
-def extract_chorus(lyrics: str | None, openai_key: str | None) -> str:
-    if not lyrics: return "Letra não encontrada no Genius."
+# =========================
+# Lógica de Letras (OpenAI Direta)
+# =========================
+def get_chorus_via_openai(title: str, artist: str, openai_key: str | None) -> str:
+    if not openai_key:
+        return "Erro: OPENAI_API_KEY não configurada."
     
-    if openai_key:
-        try:
-            client = OpenAI(api_key=openai_key)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Extraia apenas o refrão principal da letra. Máximo 8 linhas, sem comentários."},
-                    {"role": "user", "content": lyrics}
-                ],
-                temperature=0.3
-            )
-            content = resp.choices[0].message.content
-            return content.strip() if content else "Erro ao extrair o refrão."
-        except: pass
-
-    blocks = [b.strip() for b in re.split(r"\n\s*\n", lyrics) if b.strip()]
-    if not blocks: return "Não foi possível extrair."
-    best = max(blocks, key=lambda b: (blocks.count(b), len(b)))
-    return "\n".join(best.splitlines()[:8])
+    try:
+        client = OpenAI(api_key=openai_key)
+        prompt = (
+            f"Você é um especialista em música. Escreva APENAS o refrão principal da música '{title}' "
+            f"do artista '{artist}'. Retorne no máximo 8 linhas. Não adicione aspas, nem introduções, "
+            f"nem comentários. Apenas a letra. Se você não conhecer a música, responda exatamente: "
+            f"'Letra não encontrada na base de dados.'"
+        )
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        content = resp.choices[0].message.content
+        return content.strip() if content else "Erro ao extrair o refrão."
+    except Exception as e:
+        logger.error(f"Erro OpenAI: {e}")
+        return "Falha ao buscar a letra com a inteligência artificial."
 
 # =========================
 # Utilitários de UX
 # =========================
-async def get_or_fetch_chorus(m: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
-    st = context.application.bot_data["settings"]
-    g_url = await asyncio.to_thread(get_genius_url, m['title'], m['artist'], st.genius_api_key)
-    lyrics = await asyncio.to_thread(fetch_lyrics, g_url)
-    chorus = await asyncio.to_thread(extract_chorus, lyrics, st.openai_api_key)
-    return chorus
-
 def get_final_markup(key: str, show_cover: bool, show_lyrics: bool) -> InlineKeyboardMarkup:
-    # UX: Adiciona um checkmark ✓ minimalista se o toggle estiver ativo
     btn_cover = "✓ ❑ Cover" if show_cover else "❑ Cover"
     btn_lyrics = "✓ ♩Lyrics" if show_lyrics else "♩Lyrics"
     
@@ -237,7 +211,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btns = []
     for t in tracks:
         t_key = hashlib.md5(f"{t['deezer_url']}".encode()).hexdigest()[:8]
-        # Inicia o cache com um sub-dicionário de 'states' para gerenciar as mensagens
         music_cache[t_key] = {"val": t, "states": {}, "expires_at": get_now() + CACHE_TTL}
         btns.append([InlineKeyboardButton(f"{t['title']} - {t['artist']}", callback_data=f"s|{t_key}")])
     
@@ -271,7 +244,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Usuário está nos controles finais (Toggle e escolhas iniciais)
     elif action in ("y", "n", "c", "l"):
         
-        # Garante que o estado dessa mensagem específica exista
         if message_id not in m_data["states"]:
             m_data["states"][message_id] = {
                 "show_cover": False,
@@ -282,29 +254,27 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = m_data["states"][message_id]
         user_name = state["user_name"]
 
-        # Atualiza os Toggles baseados no clique
         if action == "y":
             state["show_lyrics"] = True
         elif action == "n":
             state["show_lyrics"] = False
         elif action == "c":
-            state["show_cover"] = not state["show_cover"] # Inverte o estado da Capa
+            state["show_cover"] = not state["show_cover"]
         elif action == "l":
-            state["show_lyrics"] = not state["show_lyrics"] # Inverte o estado da Letra
+            state["show_lyrics"] = not state["show_lyrics"]
 
-        # Se precisa mostrar a letra e ainda não buscou, busca agora e salva globalmente pra faixa
+        # Busca a letra direto na OpenAI caso necessário e ainda não tenha sido buscada
         if state["show_lyrics"] and "chorus" not in m_data:
-            await query.edit_message_text("🎧 Buscando refrão...")
-            m_data["chorus"] = await get_or_fetch_chorus(m, context)
+            await query.edit_message_text("🎧 Buscando refrão com IA...")
+            st = context.application.bot_data["settings"]
+            m_data["chorus"] = await asyncio.to_thread(get_chorus_via_openai, m['title'], m['artist'], st.openai_api_key)
 
-        # Constrói o layout de forma dinâmica complementando as opções
+        # Montagem do Layout
         layout = ""
         
-        # 1º Bloco: A Capa (Se ativo, joga o link invisível)
         if state["show_cover"]:
             layout += f'<a href="{m["cover"]}">&#8203;</a>'
             
-        # 2º Bloco: O cabeçalho e info da música
         layout += (
             f"♫ {user_name} está ouvindo...\n\n"
             f"♬ <b>{html.escape(m['title'])}</b>\n"
@@ -312,17 +282,13 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"★ <i>{html.escape(m['artist'])}</i>"
         )
 
-        # 3º Bloco: A Letra (Adiciona ao final se estiver ativo)
         if state["show_lyrics"]:
             layout += (
                 f"\n\n<i>♪ ♫ Lyrics:</i>\n\n"
                 f"<blockquote>{html.escape(m_data['chorus'])}</blockquote>"
             )
 
-        # Monta os botões com seus estados atuais (✓ ou não)
         markup = get_final_markup(key, state["show_cover"], state["show_lyrics"])
-
-        # O preview do link deve ser DESATIVADO caso a capa não deva ser exibida.
         disable_preview = not state["show_cover"]
 
         await safe_edit_message(query, layout, markup, disable_preview)
