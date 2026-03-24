@@ -15,8 +15,6 @@ from openai import OpenAI
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
     Update,
 )
 from telegram.constants import ParseMode
@@ -25,7 +23,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    InlineQueryHandler,
 )
 
 # =========================
@@ -186,34 +183,43 @@ def extract_chorus(lyrics: str | None, openai_key: str | None) -> tuple[str, str
     return "\n".join(best.splitlines()[:8]), "Heurística Local"
 
 # =========================
-# Telegram Handlers
+# Telegram Handlers (UX)
 # =========================
 def get_track_markup(music: dict[str, Any], key: str | None = None) -> InlineKeyboardMarkup:
     rows = []
     if key:
         rows.append([
-            InlineKeyboardButton("✓ Refrão", callback_data=f"y|{key}"),
+            InlineKeyboardButton("✓ Extrair Refrão", callback_data=f"y|{key}"),
             InlineKeyboardButton("✕ Só Info", callback_data=f"n|{key}")
         ])
     
     links = []
-    if music.get("preview"): links.append(InlineKeyboardButton("🎧 Preview", url=music["preview"]))
+    if music.get("preview"): links.append(InlineKeyboardButton("🎧 Preview (30s)", url=music["preview"]))
     if music.get("deezer_url"): links.append(InlineKeyboardButton("🔗 Deezer", url=music["deezer_url"]))
     if links: rows.append(links)
     return InlineKeyboardMarkup(rows)
 
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "Olá! Sou o bot de Músicas e Letras. 🎵\n\n"
+        "Para usar, basta digitar:\n"
+        "`/music nome da música`\n\n"
+        "Eu busco a faixa, te dou o preview e ainda tento encontrar a letra e extrair o refrão!"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
 async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
     if not query:
-        await update.message.reply_text("Uso: /music nome da música")
+        await update.message.reply_text("Uso correto: `/music nome da música`", parse_mode=ParseMode.MARKDOWN)
         return
 
     cleanup_cache()
-    # Adicionado asyncio.to_thread para não bloquear o bot!
+    # UX: Evita que o bot trave enviando a requisição para uma thread separada
     tracks = await asyncio.to_thread(search_deezer, query)
     
     if not tracks:
-        await update.message.reply_text("Nenhuma música encontrada.")
+        await update.message.reply_text("❌ Nenhuma música encontrada.")
         return
 
     session_id = uuid.uuid4().hex[:10]
@@ -223,7 +229,10 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_page(update: Update, session_id: str, page: int):
     data = session_cache.get(session_id)
-    if not data: return
+    if not data:
+        if update.callback_query:
+            await update.callback_query.edit_message_text("❌ Sessão expirada. Busque novamente.")
+        return
     
     start = page * SEARCH_PAGE_SIZE
     chunk = data["tracks"][start:start+SEARCH_PAGE_SIZE]
@@ -235,5 +244,105 @@ async def send_page(update: Update, session_id: str, page: int):
         btns.append([InlineKeyboardButton(f"{t['title']} - {t['artist']}", callback_data=f"s|{t_key}")])
     
     nav = []
-    if page > 0: nav.append(InlineKeyboardButton("◀️", callback_data=f"p|{session_id}|{page-1}"))
-    if start + SEARCH
+    if page > 0: 
+        nav.append(InlineKeyboardButton("◀️ Anterior", callback_data=f"p|{session_id}|{page-1}"))
+    if start + SEARCH_PAGE_SIZE < len(data["tracks"]): 
+        nav.append(InlineKeyboardButton("Próxima ▶️", callback_data=f"p|{session_id}|{page+1}"))
+    if nav: 
+        btns.append(nav)
+
+    text = f"🎵 Resultados para: <b>{html.escape(data['query'])}</b>\n<i>Página {page + 1}</i>"
+    markup = InlineKeyboardMarkup(btns)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # UX: Remove o ícone de carregamento do botão imediatamente
+    
+    parts = query.data.split("|")
+    action = parts[0]
+
+    if action == "p": # Paginação
+        await send_page(update, parts[1], int(parts[2]))
+    
+    elif action == "s": # Seleção de Música
+        m_data = music_cache.get(parts[1])
+        if not m_data:
+            await query.edit_message_text("❌ Dados expirados. Faça uma nova busca.")
+            return
+            
+        m = m_data["val"]
+        caption = f"♬ <b>{html.escape(m['title'])}</b>\n★ <i>{html.escape(m['artist'])}</i>"
+        markup = get_track_markup(m, parts[1])
+        
+        if m['thumb']:
+            await query.message.reply_photo(m['thumb'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=markup)
+        else:
+            await query.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    elif action in ("y", "n"): # Escolha de Refrão vs Info
+        m_data = music_cache.get(parts[1])
+        if not m_data:
+            await query.edit_message_text("❌ Dados expirados. Faça uma nova busca.")
+            return
+            
+        m = m_data["val"]
+        
+        if action == "n":
+            await query.message.reply_text("✅ Aqui estão as informações da música acima.", reply_markup=get_track_markup(m, None))
+            return
+
+        msg = await query.message.reply_text("🎧 Buscando letra e analisando o refrão...")
+        st = context.application.bot_data["settings"]
+        
+        # Async calls to prevent blocking
+        g_url = await asyncio.to_thread(get_genius_url, m['title'], m['artist'], st.genius_api_key)
+        lyrics = await asyncio.to_thread(fetch_lyrics, g_url)
+        chorus, source = await asyncio.to_thread(extract_chorus, lyrics, st.openai_api_key)
+        
+        res = (f"♬ <b>{html.escape(m['title'])}</b>\n"
+               f"★ <i>{html.escape(m['artist'])}</i>\n\n"
+               f"<b>♪ Refrão ({source}):</b>\n"
+               f"<blockquote>{html.escape(chorus)}</blockquote>")
+        
+        await msg.edit_text(res, parse_mode=ParseMode.HTML, reply_markup=get_track_markup(m, None))
+
+async def post_init(app: Application):
+    me = await app.bot.get_me()
+    logger.info("Bot conectado com sucesso! Username: @%s", me.username)
+
+# =========================
+# Main (Railway Setup)
+# =========================
+def main():
+    st = load_settings()
+    app = Application.builder().token(st.token).post_init(post_init).build()
+    app.bot_data["settings"] = st
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("music", cmd_music))
+    app.add_handler(CallbackQueryHandler(cb_handler))
+
+    if st.webhook_url:
+        webhook_path = st.token.replace(":", "_")
+        target_url = f"{st.webhook_url}/{webhook_path}"
+        logger.info(f"Iniciando em modo WEBHOOK na porta {st.port}")
+        logger.info(f"URL configurada: {target_url}")
+        
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=st.port,
+            url_path=webhook_path,
+            webhook_url=target_url,
+            secret_token=st.webhook_secret
+        )
+    else:
+        logger.info("Iniciando em modo POLLING (Aviso: Pode gerar conflito na Railway)")
+        app.run_polling()
+
+if __name__ == "__main__":
+    main()
