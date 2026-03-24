@@ -1,5 +1,14 @@
 # Pidro FM Bot
 
+Bot do Telegram focado em UX simples:
+
+1. `/music <termo>`
+2. escolhe uma música na lista
+3. decide entre **só música** ou **refrão**
+
+---
+
+## Funcionalidades
 Bot do Telegram para buscar músicas, navegar entre resultados e compartilhar informações da faixa com capa, preview e refrão quando disponível.
 
 ## O que o bot faz
@@ -12,7 +21,13 @@ Bot do Telegram para buscar músicas, navegar entre resultados e compartilhar in
 - Usa OpenAI para extrair um refrão melhor quando `OPENAI_API_KEY` estiver configurada.
 - Funciona em modo `polling`, `webhook` e busca inline no Telegram.
 
-## Requisitos
+- Busca músicas na Deezer.
+- Resultado paginado com botão **Load more**.
+- Cartão com capa, preview e link Deezer quando disponível.
+- Busca letra (Genius, com fallback lyrics.ovh).
+- Extração de refrão com OpenAI (opcional) + fallback local.
+- Modo inline do Telegram.
+- Execução em `polling` ou `webhook`.
 
 - Python 3.10+
 - Token do bot do Telegram
@@ -25,12 +40,26 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Configuração
+---
 
-Copie o arquivo `.env.example` e configure as variáveis:
+## Variáveis de ambiente
+
+- `TELEGRAM_TOKEN` (**obrigatória**)
+- `RUN_MODE` = `auto` (default), `polling` ou `webhook`
+- `WEBHOOK_URL` (obrigatória no modo webhook)
+- `WEBHOOK_SECRET` (opcional, auto-gerada se vazia)
+- `PORT` (default `8443`)
+- `GENIUS_API_KEY` (opcional)
+- `OPENAI_API_KEY` (opcional)
+
+> O bot carrega `.env` automaticamente se o arquivo existir.
+
+---
+
+## Rodar local
 
 ```bash
-cp .env.example .env
+python main.py
 ```
 
 Variáveis principais:
@@ -52,13 +81,21 @@ Variáveis principais:
 /music Daft Punk One More Time
 ```
 
-## Execução local
+## Railway (seu caso)
 
+Use no ambiente da Railway:
+
+```env
+TELEGRAM_TOKEN=SEU_TOKEN
+RUN_MODE=webhook
+WEBHOOK_URL=https://pidrofmbot-v2-production.up.railway.app
+WEBHOOK_SECRET=seu-segredo
+PORT=8443
 ```bash
 python main.py
 ```
 
-Se `WEBHOOK_URL` não estiver definido, o bot roda em modo polling.
+URL final usada pelo bot:
 
 ## Railway + webhook
 
@@ -85,6 +122,7 @@ O código agora também tenta detectar URL pública da Railway por `RAILWAY_PUBL
 https://pidrofmbot-v2-production.up.railway.app/<TELEGRAM_TOKEN>
 ```
 
+Registrar webhook manualmente (opcional):
 ### Registrar manualmente no Telegram
 
 ```bash
@@ -93,6 +131,21 @@ curl -X POST "https://api.telegram.org/botSEU_TOKEN/setWebhook" \
   -d "secret_token=SEU_SEGREDO"
 ```
 
+Conferir status webhook:
+
+```bash
+curl "https://api.telegram.org/botSEU_TOKEN/getWebhookInfo"
+```
+
+---
+
+## Comandos do bot
+
+- `/start`
+- `/help`
+- `/music <termo>`
+
+---
 ### Verificar webhook
 
 ```bash
