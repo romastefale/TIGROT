@@ -138,17 +138,16 @@ def search_deezer(query: str) -> list[dict[str, Any]]:
 # =========================
 # Lógica de Letras (OpenAI Direta)
 # =========================
-def get_chorus_via_openai(title: str, artist: str, openai_key: str | None) -> str:
+def get_chorus_via_openai(title: str, artist: str, album: str, openai_key: str | None) -> str:
     if not openai_key:
         return "❌ Erro: OPENAI_API_KEY não configurada."
     
     try:
         client = OpenAI(api_key=openai_key)
+        # Novo prompt mais direto, conforme solicitado!
         prompt = (
-            f"Você é um especialista em música. Escreva APENAS o refrão principal da música '{title}' "
-            f"do artista '{artist}'. Retorne no máximo 8 linhas. Não adicione aspas, nem introduções, "
-            f"nem comentários. Apenas a letra. Se você não conhecer a música, responda exatamente: "
-            f"'Letra não encontrada na base de dados.'"
+            f"Forneça o Refrão da música {title}, de {artist}, do album {album}. "
+            "Retorne APENAS as linhas da letra do refrão. Sem aspas, sem introdução, sem títulos."
         )
         
         resp = client.chat.completions.create(
@@ -160,7 +159,7 @@ def get_chorus_via_openai(title: str, artist: str, openai_key: str | None) -> st
         return content.strip() if content else "⚠️ Erro ao extrair o refrão."
     except Exception as e:
         logger.error(f"Erro OpenAI: {e}")
-        return "⚠️ Falha ao buscar a letra com a inteligência artificial."
+        return "⚠️ Falha ao buscar a letra com a inteligência artificial. Verifique sua chave API ou saldo."
 
 # =========================
 # Utilitários de UX
@@ -268,11 +267,17 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "l":
             state["show_lyrics"] = not state["show_lyrics"] # Inverte o estado da Letra
 
-        # Se precisa mostrar a letra e ainda não buscou, busca agora e salva globalmente pra faixa
+        # Se precisa mostrar a letra e ainda não buscou, busca agora com o novo prompt
         if state["show_lyrics"] and "chorus" not in m_data:
             await query.edit_message_text("🎧 Buscando refrão com IA...")
             st = context.application.bot_data["settings"]
-            m_data["chorus"] = await asyncio.to_thread(get_chorus_via_openai, m['title'], m['artist'], st.openai_api_key)
+            m_data["chorus"] = await asyncio.to_thread(
+                get_chorus_via_openai, 
+                m['title'], 
+                m['artist'], 
+                m['album'], 
+                st.openai_api_key
+            )
 
         # Constrói o layout de forma dinâmica complementando as opções
         layout = ""
