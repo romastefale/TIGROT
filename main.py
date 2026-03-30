@@ -6,6 +6,7 @@ import asyncio
 import logging
 import requests
 import telegram.error
+from threading import Lock
 
 from concurrent.futures import ThreadPoolExecutor
 from telegram import (
@@ -52,10 +53,11 @@ except ValueError:
     PORT = 8443
 
 if not TOKEN:
-    raise ValueError("Configure TELEGRAM_TOKEN nas variáveis do Railway/Render")
+    raise ValueError("Configure TELEGRAM_TOKEN nas variáveis do Railway")
 
 session = requests.Session()
 cache = {}
+cache_lock = Lock()  # Lock adicionado para evitar Race Conditions em Multi-threading
 CACHE_MAX_SIZE = 500
 _executor = ThreadPoolExecutor(max_workers=4)
 
@@ -88,11 +90,9 @@ async def sanitize_text(text):
 
     text = str(text)
 
-    # Se não encontrar nenhum caractere proibido, retorna o texto original rapidamente
     if not FORBIDDEN_PATTERN.search(text):
         return text
 
-    # 1. Tentar traduzir para o Inglês sem bloquear o event loop
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
@@ -102,7 +102,6 @@ async def sanitize_text(text):
             "dt": "t",
             "q": text
         }
-        # Executa o requests em uma thread separada
         response = await asyncio.to_thread(session.get, url, params=params, timeout=3)
         if response.status_code == 200:
             data = response.json()
@@ -113,7 +112,6 @@ async def sanitize_text(text):
     except Exception as e:
         logger.warning(f"Falha na tradução automática, aplicando omissão: {e}")
 
-    # 2. Se a tradução falhar, omitir os caracteres proibidos
     sanitized = FORBIDDEN_PATTERN.sub("", text)
     sanitized = re.sub(r'\s+', ' ', sanitized).strip()
 
@@ -125,10 +123,11 @@ def escape_markdown(text):
 
 
 def evict_cache():
-    if len(cache) >= CACHE_MAX_SIZE:
-        oldest_keys = list(cache.keys())[:100]
-        for k in oldest_keys:
-            del cache[k]
+    with cache_lock:
+        if len(cache) >= CACHE_MAX_SIZE:
+            oldest_keys = list(cache.keys())[:100]
+            for k in oldest_keys:
+                del cache[k]
 
 
 def is_admin(user_id: int | None) -> bool:
@@ -145,7 +144,7 @@ async def send_log_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# COMANDO /LOG (Refatorado para as 5 etapas)
+# COMANDO /LOG
 # =========================
 async def start_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
@@ -171,7 +170,6 @@ async def handle_log_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Reenvia exatamente o que foi enviado (Etapas 2, 3 e 4)
         await context.bot.copy_message(
             chat_id=msg.chat_id,
             from_chat_id=msg.chat_id,
@@ -191,8 +189,6 @@ async def handle_log_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     await msg.reply_text("🆗Correto?", reply_markup=keyboard)
-
-    # Pausa a espera até que o admin clique em "Editar..."
     context.user_data["awaiting_log"] = False
 
 
@@ -225,7 +221,6 @@ async def handle_log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
         
-        # Etapa 5: Retorna ao passo 1
         await cb_query.message.reply_text(
             "📝Qual texto de <i>Update</i> você deseja enviar?",
             parse_mode=ParseMode.HTML
@@ -258,15 +253,17 @@ def score_track(track, query):
 
 
 # =========================
-# BUSCA NA API (Mantido em Executor Thread)
+# BUSCA NA API (Seguro para Threads)
 # =========================
 def _search_deezer_sync(query, index=0):
     query = re.sub(r"[-_]+", " ", query)
     query = re.sub(r"\s+", " ", query).strip()
 
     cache_key = f"{query}_{index}"
-    if cache_key in cache:
-        return cache[cache_key]
+    
+    with cache_lock:
+        if cache_key in cache:
+            return cache[cache_key]
 
     for attempt in range(3):
         try:
@@ -287,7 +284,8 @@ def _search_deezer_sync(query, index=0):
             )
 
             evict_cache()
-            cache[cache_key] = tracks
+            with cache_lock:
+                cache[cache_key] = tracks
             return tracks
 
         except Exception:
@@ -297,7 +295,8 @@ def _search_deezer_sync(query, index=0):
 
 
 async def search_deezer(query, index=0):
-    loop = asyncio.get_event_loop()
+    # Atualizado para get_running_loop() (Python 3.12+)
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _search_deezer_sync, query, index)
 
 
@@ -448,14 +447,12 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     track = tracks[index]
 
-    # Requisito 2: Se houver alfabeto proibido na faixa não busca letra / retorna erro
     if (FORBIDDEN_PATTERN.search(track["title"]) or 
         FORBIDDEN_PATTERN.search(track["artist"]["name"]) or 
         FORBIDDEN_PATTERN.search(track["album"]["title"])):
         await cb_query.message.reply_text("❌ Letra não encontrada.")
         return
 
-    # Higieniza e escapa os dados finais
     title = escape_markdown(await sanitize_text(track["title"]))
     artist = escape_markdown(await sanitize_text(track["artist"]["name"]))
     album = escape_markdown(await sanitize_text(track["album"]["title"]))
@@ -463,14 +460,23 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_name = escape_markdown(await sanitize_text(cb_query.from_user.first_name))
 
-    await cb_query.message.reply_photo(
-        photo=cover,
-        caption=(
+    try:
+        await cb_query.message.reply_photo(
+            photo=cover,
+            caption=(
+                f"♫ {user_name} is listening to...\n\n"
+                f"♬ *{title}* - _{album} — {artist}_"
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao enviar foto: {e}")
+        await cb_query.message.reply_text(
             f"♫ {user_name} is listening to...\n\n"
-            f"♬ *{title}* - _{album} — {artist}_"
-        ),
-        parse_mode="Markdown"
-    )
+            f"♬ *{title}* - _{album} — {artist}_\n\n"
+            f"(A capa do álbum não pôde ser carregada)",
+            parse_mode="Markdown"
+        )
 
 
 # =========================
@@ -491,7 +497,6 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, search_music)
     )
 
-    # Captura todo formato de mídia enviado fora dos comandos, usado para o /log
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, handle_log_input),
         group=1
