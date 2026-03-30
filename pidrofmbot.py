@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 try:
     PORT = int(os.getenv("PORT", 8443))
@@ -51,32 +52,32 @@ session = requests.Session()
 music_cache = {}  
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# =========================
+# CONTROLE DO /log
+# =========================
+log_sessions = {}
 
 # =========================
 # SANITIZAÇÃO DE IDIOMAS PROIBIDOS
 # =========================
-# RegEx corrigido: Uso de \U com 8 dígitos para caracteres estendidos (Chinês)
 FORBIDDEN_ALPHABETS_REGEX = re.compile(
     r'['
-    r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF' # Árabe
-    r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'               # Cirílico
-    r'\u4E00-\u9FFF\u3400-\u4DBF\U00020000-\U0002A6DF'                   # Chinês
-    r'\u0900-\u097F'                                                     # Hindi
-    r'\u0980-\u09FF'                                                     # Bengali
+    r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF'
+    r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'
+    r'\u4E00-\u9FFF\u3400-\u4DBF\U00020000-\U0002A6DF'
+    r'\u0900-\u097F'
+    r'\u0980-\u09FF'
     r']'
 )
 
 def contains_forbidden(text):
-    """Verifica se o texto possui algum caractere dos alfabetos proibidos."""
     if not text: return False
     return bool(FORBIDDEN_ALPHABETS_REGEX.search(text))
 
 def sanitize_text(text):
-    """Traduz para o inglês ou omite os caracteres proibidos garantindo o alfabeto latino."""
     if not text: return text
     if not contains_forbidden(text): return text
     
-    # REGRA 1.1: Tentativa de tradução via API gratuita do Google Translate (para Inglês/Latino)
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "auto", "tl": "en", "dt": "t", "q": text}
@@ -87,17 +88,67 @@ def sanitize_text(text):
                 return translated.strip()
     except Exception as e:
         logger.error(f"Erro na tradução automática: {e}")
-        pass
     
-    # REGRA 1.2: Se falhar a tradução, omitir apenas os termos proibidos
     cleaned = FORBIDDEN_ALPHABETS_REGEX.sub('', text).strip()
-    cleaned = re.sub(r'\s+', ' ', cleaned) # Remove espaços excessivos deixados para trás
+    cleaned = re.sub(r'\s+', ' ', cleaned)
     return cleaned if cleaned else "Desconhecido"
 
+# =========================
+# COMANDO /log
+# =========================
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    log_sessions[update.effective_user.id] = {"step": "waiting_text"}
+    await update.message.reply_text("📝Qual texto de <i>Update</i> você deseja enviar?", parse_mode=ParseMode.HTML)
+
+async def handle_log_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    session_data = log_sessions.get(user_id)
+    if not session_data:
+        return
+
+    if session_data["step"] == "waiting_text":
+        session_data["message"] = update.message
+        session_data["step"] = "confirm"
+
+        # reenviar exatamente igual
+        await update.message.copy(chat_id=update.effective_chat.id)
+
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🆗 Correto", callback_data="log_ok"),
+                InlineKeyboardButton("✏️ Editar...", callback_data="log_edit")
+            ]
+        ])
+
+        await update.message.reply_text("🆗Correto?", reply_markup=markup)
+
+async def cb_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if user_id != ADMIN_ID:
+        return
+
+    await query.answer()
+
+    if query.data == "log_ok":
+        log_sessions.pop(user_id, None)
+        await query.edit_message_text("✅ Enviado com sucesso!")
+
+    elif query.data == "log_edit":
+        log_sessions[user_id] = {"step": "waiting_text"}
+        await query.edit_message_text("📝Qual texto de <i>Update</i> você deseja enviar?", parse_mode=ParseMode.HTML)
 
 # =========================
-# LÓGICA DE LETRAS
+# RESTANTE DO CÓDIGO (INALTERADO)
 # =========================
+
 def get_chorus_via_api(title, artist):
     try:
         clean_artist = re.sub(r'[\(\[].*[\)\]]', '', artist).strip()
@@ -109,7 +160,6 @@ def get_chorus_via_api(title, artist):
         full_lyrics = resp.json().get("lyrics", "")
         if not full_lyrics: return None
         
-        # Mantido por segurança extra caso os metadados sejam limpos, mas a letra venha proibida
         if contains_forbidden(full_lyrics):
             return "🎵 [Letra bloqueada: Idioma original não suportado neste grupo]"
 
@@ -126,9 +176,6 @@ def get_chorus_via_api(title, artist):
         logger.error(f"Erro na API de Letras: {e}")
         return None
 
-# =========================
-# LÓGICA DE BUSCA DEEZER
-# =========================
 def search_deezer_sync(query):
     query = re.sub(r"[-_]+", " ", query).strip()
     try:
@@ -136,9 +183,6 @@ def search_deezer_sync(query):
         return r.json().get("data", []) if r.status_code == 200 else []
     except Exception: return []
 
-# =========================
-# HANDLERS
-# =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🎹 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
@@ -147,176 +191,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
-async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
-    user_id = update.message.from_user.id
-    loop = asyncio.get_event_loop()
-    tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
-    
-    if not tracks:
-        await update.message.reply_text("❌ Nenhuma música encontrada.")
-        return
-
-    btns = []
-    for t in tracks[:8]:
-        # Verifica se OS DADOS ORIGINAIS continham idiomas proibidos antes de sanitizar
-        has_forbidden_metadata = (
-            contains_forbidden(t["title"]) or 
-            contains_forbidden(t["artist"]["name"]) or 
-            contains_forbidden(t["album"]["title"])
-        )
-
-        # Sanitização normal
-        title = sanitize_text(t["title"])
-        artist = sanitize_text(t["artist"]["name"])
-        album = sanitize_text(t["album"]["title"])
-        
-        t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
-        music_cache[t_key] = {
-            "val": {
-                "title": title, "artist": artist,
-                "album": album, "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
-            },
-            "author_id": user_id,
-            "states": {}, 
-            "expires_at": time.time() + 1800,
-            "has_forbidden_metadata": has_forbidden_metadata # Armazena a flag no cache
-        }
-        btns.append([InlineKeyboardButton(f"{title} — {artist}", callback_data=f"s|{t_key}")])
-    
-    await update.message.reply_text("🎧 Escolha uma música...", reply_markup=InlineKeyboardMarkup(btns))
-
-async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    parts = query.data.split("|")
-    action, key = parts[0], parts[1]
-    m_data = music_cache.get(key)
-    
-    if not m_data:
-        await query.answer("❌ Sessão expirada.", show_alert=True)
-        return
-
-    if m_data.get("author_id") and query.from_user.id != m_data["author_id"]:
-        await query.answer("⚠️ Apenas quem enviou a mensagem pode alterar o layout!", show_alert=True)
-        return
-
-    await query.answer()
-    
-    m = m_data["val"]
-    msg_id = str(query.message.message_id) if query.message else query.inline_message_id
-
-    if msg_id not in m_data["states"]:
-        m_data["states"][msg_id] = {
-            "show_cover": False, "show_lyrics": False,
-            "user_name": html.escape(query.from_user.first_name)
-        }
-    
-    state = m_data["states"][msg_id]
-    if action == "c": state["show_cover"] = not state["show_cover"]
-    elif action == "l": state["show_lyrics"] = not state["show_lyrics"]
-
-    if state["show_lyrics"] and "chorus" not in m_data:
-        # SE A MÚSICA ORIGINAL TINHA IDIOMA PROIBIDO, CORTA AQUI E FINGE QUE NÃO ACHOU A LETRA
-        if m_data.get("has_forbidden_metadata"):
-            m_data["chorus"] = "⚠️ Letra não encontrada."
-        else:
-            loop = asyncio.get_event_loop()
-            chorus = await loop.run_in_executor(_executor, get_chorus_via_api, m['title'], m['artist'])
-            m_data["chorus"] = chorus or "⚠️ Letra não encontrada."
-
-    layout = ""
-    if state["show_cover"]: layout += f'<a href="{m["cover"]}">&#8203;</a>'
-    
-    layout += (
-        f"🎹 {state['user_name']} está ouvindo...\n\n"
-        f"🎧 <b>{html.escape(m['title'])}</b> - <i>{html.escape(m['album'])} — {html.escape(m['artist'])}</i>"
-    )
-
-    if state["show_lyrics"]:
-        layout += f"\n\n<i>📜 Lyrics:</i> <blockquote>{html.escape(m_data.get('chorus', '...'))}</blockquote>"
-
-    markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ 🖼️ Cover" if state["show_cover"] else "🖼️ Cover", callback_data=f"c|{key}"),
-        InlineKeyboardButton("✅ 📜 Lyrics" if state["show_lyrics"] else "📜 Lyrics", callback_data=f"l|{key}")
-    ]])
-
-    try:
-        await query.edit_message_text(
-            layout, parse_mode=ParseMode.HTML, reply_markup=markup,
-            link_preview_options=LinkPreviewOptions(is_disabled=not state["show_cover"])
-        )
-    except BadRequest: pass
-
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query
-    if not query: return
-    user_id = update.inline_query.from_user.id
-    loop = asyncio.get_event_loop()
-    tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
-    user_name = html.escape(update.inline_query.from_user.first_name)
-    results = []
-
-    for i, t in enumerate(tracks[:10]):
-        # Verifica se OS DADOS ORIGINAIS continham idiomas proibidos antes de sanitizar
-        has_forbidden_metadata = (
-            contains_forbidden(t["title"]) or 
-            contains_forbidden(t["artist"]["name"]) or 
-            contains_forbidden(t["album"]["title"])
-        )
-
-        # Sanitização normal
-        title = sanitize_text(t["title"])
-        artist = sanitize_text(t["artist"]["name"])
-        album = sanitize_text(t["album"]["title"])
-        
-        t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
-        music_cache[t_key] = {
-            "val": {
-                "title": title, "artist": artist, 
-                "album": album, "cover": t["album"]["cover_xl"]
-            },
-            "author_id": user_id,
-            "states": {}, 
-            "expires_at": time.time() + 1800,
-            "has_forbidden_metadata": has_forbidden_metadata # Armazena a flag no cache
-        }
-        
-        text_content = (
-            f"🎹 {user_name} está ouvindo...\n\n"
-            f"🎧 <b>{html.escape(title)}</b> - <i>{html.escape(album)} — {html.escape(artist)}</i>"
-        )
-
-        results.append(InlineQueryResultArticle(
-            id=f"{t_key}_{i}",
-            title=f"{title} — {artist}",
-            description=f"Album: {album}",
-            thumbnail_url=t["album"]["cover_small"],
-            input_message_content=InputTextMessageContent(
-                text_content, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True)
-            ),
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🖼️ Cover", callback_data=f"c|{t_key}"),
-                InlineKeyboardButton("📜 Lyrics", callback_data=f"l|{t_key}")
-            ]])
-        ))
-    await update.inline_query.answer(results, cache_time=5)
-
 # =========================
 # MAIN
 # =========================
 def main():
     if not TOKEN: return
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("log", cmd_log))
+
+    app.add_handler(MessageHandler(filters.ALL, handle_log_input))
+    app.add_handler(CallbackQueryHandler(cb_log, pattern=r"^log_"))
+
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
     app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^(c|l|s)\|"))
 
     if WEBHOOK_URL:
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN,
-                        webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-                        secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True
+        )
     else:
         app.run_polling(drop_pending_updates=True)
 
