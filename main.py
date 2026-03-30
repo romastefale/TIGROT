@@ -1,4 +1,4 @@
-from pidrofmbot import main
+from tigraoFM import main
 
 
 if __name__ == "__main__":
