@@ -55,13 +55,15 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # =========================
 # SANITIZAÇÃO DE IDIOMAS PROIBIDOS
 # =========================
-# RegEx para detectar: Árabe, Cirílico, Chinês, Hindi (Devanagari) e Bengali
+# RegEx corrigido: Uso de \U com 8 dígitos para caracteres estendidos (Chinês)
 FORBIDDEN_ALPHABETS_REGEX = re.compile(
-    r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF' # Árabe
+    r'['
+    r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF' # Árabe
     r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'               # Cirílico
-    r'\u4E00-\u9FFF\u3400-\u4DBF\u20000-\u2A6DF'                         # Chinês
+    r'\u4E00-\u9FFF\u3400-\u4DBF\U00020000-\U0002A6DF'                   # Chinês (Corrigido para \U maiúsculo)
     r'\u0900-\u097F'                                                     # Hindi
-    r'\u0980-\u09FF]'                                                    # Bengali
+    r'\u0980-\u09FF'                                                     # Bengali
+    r']'
 )
 
 def contains_forbidden(text):
@@ -81,8 +83,9 @@ def sanitize_text(text):
         resp = session.get(url, params=params, timeout=3)
         if resp.status_code == 200:
             translated = "".join([sentence[0] for sentence in resp.json()[0]])
+            # Verifica se a tradução realmente limpou os caracteres proibidos
             if not contains_forbidden(translated):
-                return translated
+                return translated.strip()
     except Exception as e:
         logger.error(f"Erro na tradução automática: {e}")
         pass
@@ -90,7 +93,7 @@ def sanitize_text(text):
     # REGRA 1.2: Se falhar a tradução, omitir apenas os termos proibidos
     cleaned = FORBIDDEN_ALPHABETS_REGEX.sub('', text).strip()
     cleaned = re.sub(r'\s+', ' ', cleaned) # Remove espaços excessivos deixados para trás
-    return cleaned if cleaned else "Unknown"
+    return cleaned if cleaned else "Desconhecido"
 
 
 # =========================
@@ -107,9 +110,9 @@ def get_chorus_via_api(title, artist):
         full_lyrics = resp.json().get("lyrics", "")
         if not full_lyrics: return None
         
-        # REGRA 1.1.1: Se a letra estiver num idioma proibido, simula sucesso mas não exibe os caracteres.
+        # REGRA 1.1.1: Se a letra estiver num idioma proibido, simula sucesso e oculta a letra.
         if contains_forbidden(full_lyrics):
-            return "🎵 [Letra bloqueada: O idioma original da música não é suportado pelo grupo]"
+            return "🎵 [Letra bloqueada: Idioma original não suportado neste grupo]"
 
         parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_lyrics, flags=re.IGNORECASE)
         if len(parts) > 1: return parts[2].strip().split('\n\n')[0]
@@ -157,7 +160,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     btns = []
     for t in tracks[:8]:
-        # Aplicação das regras de sanitização / tradução (Regra 1.1 e 1.2)
+        # Aplicação das regras 1.1 e 1.2
         title = sanitize_text(t["title"])
         artist = sanitize_text(t["artist"]["name"])
         album = sanitize_text(t["album"]["title"])
@@ -244,7 +247,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = []
 
     for i, t in enumerate(tracks[:10]):
-        # Aplicação das regras de sanitização / tradução (Regra 1.1 e 1.2)
+        # Aplicação das regras 1.1 e 1.2
         title = sanitize_text(t["title"])
         artist = sanitize_text(t["artist"]["name"])
         album = sanitize_text(t["album"]["title"])
