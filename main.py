@@ -46,11 +46,12 @@ except ValueError:
     logger.warning("Invalid ADMIN_ID value, bot will run without admin restriction.")
     ADMIN_ID = None
 
+# AJUSTE RAILWAY: Alterado o fallback para a porta 8080 conforme o painel de networking
 try:
-    PORT = int(os.getenv("PORT", 8443))
+    PORT = int(os.getenv("PORT", 8080))
 except ValueError:
-    logger.warning("Invalid PORT value, defaulting to 8443")
-    PORT = 8443
+    logger.warning("Invalid PORT value, defaulting to 8080")
+    PORT = 8080
 
 if not TOKEN:
     raise ValueError("Configure TELEGRAM_TOKEN nas variáveis do Railway")
@@ -511,6 +512,7 @@ def main():
     )
 
     if WEBHOOK_URL:
+        # Ajustado o host de listen para 0.0.0.0 (todos os IPs), permitindo que o Railway direcione o tráfego da 8080.
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
