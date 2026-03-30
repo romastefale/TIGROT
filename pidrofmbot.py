@@ -51,6 +51,48 @@ session = requests.Session()
 music_cache = {}  
 _executor = ThreadPoolExecutor(max_workers=4)
 
+
+# =========================
+# SANITIZAÇÃO DE IDIOMAS PROIBIDOS
+# =========================
+# RegEx para detectar: Árabe, Cirílico, Chinês, Hindi (Devanagari) e Bengali
+FORBIDDEN_ALPHABETS_REGEX = re.compile(
+    r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF' # Árabe
+    r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'               # Cirílico
+    r'\u4E00-\u9FFF\u3400-\u4DBF\u20000-\u2A6DF'                         # Chinês
+    r'\u0900-\u097F'                                                     # Hindi
+    r'\u0980-\u09FF]'                                                    # Bengali
+)
+
+def contains_forbidden(text):
+    """Verifica se o texto possui algum caractere dos alfabetos proibidos."""
+    if not text: return False
+    return bool(FORBIDDEN_ALPHABETS_REGEX.search(text))
+
+def sanitize_text(text):
+    """Traduz para o inglês ou omite os caracteres proibidos garantindo o alfabeto latino."""
+    if not text: return text
+    if not contains_forbidden(text): return text
+    
+    # REGRA 1.1: Tentativa de tradução via API gratuita do Google Translate (para Inglês/Latino)
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "auto", "tl": "en", "dt": "t", "q": text}
+        resp = session.get(url, params=params, timeout=3)
+        if resp.status_code == 200:
+            translated = "".join([sentence[0] for sentence in resp.json()[0]])
+            if not contains_forbidden(translated):
+                return translated
+    except Exception as e:
+        logger.error(f"Erro na tradução automática: {e}")
+        pass
+    
+    # REGRA 1.2: Se falhar a tradução, omitir apenas os termos proibidos
+    cleaned = FORBIDDEN_ALPHABETS_REGEX.sub('', text).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned) # Remove espaços excessivos deixados para trás
+    return cleaned if cleaned else "Unknown"
+
+
 # =========================
 # LÓGICA DE LETRAS
 # =========================
@@ -60,9 +102,15 @@ def get_chorus_via_api(title, artist):
         clean_title = re.sub(r'[\(\[].*[\)\]]', '', title).strip()
         url = f"https://api.lyrics.ovh/v1/{clean_artist}/{clean_title}"
         resp = session.get(url, timeout=10)
+        
         if resp.status_code != 200: return None
         full_lyrics = resp.json().get("lyrics", "")
         if not full_lyrics: return None
+        
+        # REGRA 1.1.1: Se a letra estiver num idioma proibido, simula sucesso mas não exibe os caracteres.
+        if contains_forbidden(full_lyrics):
+            return "🎵 [Letra bloqueada: O idioma original da música não é suportado pelo grupo]"
+
         parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_lyrics, flags=re.IGNORECASE)
         if len(parts) > 1: return parts[2].strip().split('\n\n')[0]
         stanzas = [s.strip() for s in full_lyrics.split('\n\n') if len(s.strip()) > 20]
@@ -99,7 +147,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
-    user_id = update.message.from_user.id # Captura o autor
+    user_id = update.message.from_user.id
     loop = asyncio.get_event_loop()
     tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
     
@@ -109,17 +157,22 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     btns = []
     for t in tracks[:8]:
+        # Aplicação das regras de sanitização / tradução (Regra 1.1 e 1.2)
+        title = sanitize_text(t["title"])
+        artist = sanitize_text(t["artist"]["name"])
+        album = sanitize_text(t["album"]["title"])
+        
         t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
         music_cache[t_key] = {
             "val": {
-                "title": t["title"], "artist": t["artist"]["name"],
-                "album": t["album"]["title"], "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
+                "title": title, "artist": artist,
+                "album": album, "cover": t["album"]["cover_xl"] or t["album"]["cover_big"],
             },
-            "author_id": user_id, # Armazena o autor no cache
+            "author_id": user_id,
             "states": {}, 
             "expires_at": time.time() + 1800
         }
-        btns.append([InlineKeyboardButton(f"{t['title']} — {t['artist']['name']}", callback_data=f"s|{t_key}")])
+        btns.append([InlineKeyboardButton(f"{title} — {artist}", callback_data=f"s|{t_key}")])
     
     await update.message.reply_text("🎧 Escolha uma música...", reply_markup=InlineKeyboardMarkup(btns))
 
@@ -134,7 +187,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ Sessão expirada.", show_alert=True)
         return
 
-    # TRAVA DE SEGURANÇA: Verifica se quem clicou é o autor
     if m_data.get("author_id") and query.from_user.id != m_data["author_id"]:
         await query.answer("⚠️ Apenas quem enviou a mensagem pode alterar o layout!", show_alert=True)
         return
@@ -185,33 +237,38 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query
     if not query: return
-    user_id = update.inline_query.from_user.id # Captura o autor no inline
+    user_id = update.inline_query.from_user.id
     loop = asyncio.get_event_loop()
     tracks = await loop.run_in_executor(_executor, search_deezer_sync, query)
     user_name = html.escape(update.inline_query.from_user.first_name)
     results = []
 
     for i, t in enumerate(tracks[:10]):
+        # Aplicação das regras de sanitização / tradução (Regra 1.1 e 1.2)
+        title = sanitize_text(t["title"])
+        artist = sanitize_text(t["artist"]["name"])
+        album = sanitize_text(t["album"]["title"])
+        
         t_key = hashlib.md5(t["link"].encode()).hexdigest()[:8]
         music_cache[t_key] = {
             "val": {
-                "title": t["title"], "artist": t["artist"]["name"], 
-                "album": t["album"]["title"], "cover": t["album"]["cover_xl"]
+                "title": title, "artist": artist, 
+                "album": album, "cover": t["album"]["cover_xl"]
             },
-            "author_id": user_id, # Armazena o autor no cache
+            "author_id": user_id,
             "states": {}, 
             "expires_at": time.time() + 1800
         }
         
         text_content = (
             f"🎹 {user_name} está ouvindo...\n\n"
-            f"🎧 <b>{html.escape(t['title'])}</b> - <i>{html.escape(t['album']['title'])} — {html.escape(t['artist']['name'])}</i>"
+            f"🎧 <b>{html.escape(title)}</b> - <i>{html.escape(album)} — {html.escape(artist)}</i>"
         )
 
         results.append(InlineQueryResultArticle(
             id=f"{t_key}_{i}",
-            title=f"{t['title']} — {t['artist']['name']}",
-            description=f"Album: {t['album']['title']}",
+            title=f"{title} — {artist}",
+            description=f"Album: {album}",
             thumbnail_url=t["album"]["cover_small"],
             input_message_content=InputTextMessageContent(
                 text_content, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True)
