@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -58,6 +59,17 @@ RANKS = [
 SUITS = ["Copas", "Paus", "Espadas", "Ouros"]
 MINOR = {s: [f"{r} de {s}" for r in RANKS] for s in SUITS}
 ALL_CARDS = TAROT_MAJOR + [c for s in SUITS for c in MINOR[s]]
+
+TIRAGENS = {
+    "dia": {"label": "🌞 Carta do Dia / Sim ou Não", "count": 1, "prompt_name": "Carta do Dia / Sim ou Não"},
+    "pf": {"label": "🕰️ Passado, Presente e Futuro", "count": 3, "prompt_name": "Passado, Presente e Futuro"},
+    "sc": {"label": "🧭 Situação, Desafio e Conselho", "count": 3, "prompt_name": "Situação, Desafio e Conselho"},
+    "peladan": {"label": "✳️ Tiragem Péladan", "count": 5, "prompt_name": "Tiragem Péladan"},
+    "ferradura": {"label": "🐎 Ferradura", "count": 7, "prompt_name": "Ferradura"},
+    "cruz": {"label": "✝️ Cruz Celta", "count": 10, "prompt_name": "Cruz Celta"},
+    "mandala12": {"label": "🪐 Mandala Astrológica (12 cartas)", "count": 12, "prompt_name": "Mandala Astrológica"},
+    "mandala13": {"label": "🪐 Mandala Astrológica (13 cartas)", "count": 13, "prompt_name": "Mandala Astrológica"},
+}
 
 RWS_MAJOR_IMAGE_STEMS = {
     "O Louco": "TarotRWS-00-louco",
@@ -165,9 +177,25 @@ def split_text(text: str, limit: int = 3800) -> List[str]:
     return parts
 
 
+def markdown_to_html(text: str) -> str:
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
+    text = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<i>\1</i>", text)
+    return text
+
+
+def prepare_telegram_html(text: str) -> str:
+    return markdown_to_html(text)
+
+
 async def send_split_message(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     for part in split_text(text):
-        await context.bot.send_message(chat_id=chat_id, text=part)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=prepare_telegram_html(part),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
 # ---------------- SESSÃO ----------------
 
@@ -262,44 +290,50 @@ if not GEMINI_API_KEY:
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-def build_prompt(cards: List[Dict[str, Any]]) -> str:
+def build_prompt(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
     txt = "\n".join(
         f"{i + 1}. {c['name']} ({'invertida' if c['rev'] else 'normal'})"
         for i, c in enumerate(cards)
     )
 
+    tiragem_line = f"Tiragem: {tiragem_name}\n" if tiragem_name else ""
+
     return f"""
 Você é um intérprete didático de tarot.
 
-Responda sempre nesta ordem:
-1. Carta 1
-   - significado
-   - ponto positivo
-   - ponto negativo
-2. Carta 2
-   - significado
-   - ponto positivo
-   - ponto negativo
-3. Combinações entre cartas
-4. Visão global da tiragem
+{tiragem_line}Responda em PORTUGUÊS DO BRASIL e use APENAS HTML do Telegram para formatação.
+Não use asteriscos literais para negrito ou itálico.
+Use emoji relacionados ao conteúdo.
+Use este formato:
+
+<b>🃏 Carta 1 — NOME</b>
+<i>Significado:</i> ...
+<i>Ponto positivo:</i> ...
+<i>Ponto negativo:</i> ...
+
+<b>🔗 Combinações</b>
+...
+
+<b>🌙 Visão global</b>
+...
 
 Regras:
 - Não omita aspectos negativos.
 - Não suavize o que for difícil.
 - Não afirme certezas absolutas.
 - Seja claro, direto e didático.
-- Escreva em português do Brasil.
-- Use separação por parágrafos.
+- Se a carta estiver invertida, interprete isso de forma explícita.
+- Traga a leitura por tiragem quando houver nome informado.
 
 Cartas:
 {txt}
 """.strip()
 
 
-def ai(cards: List[Dict[str, Any]]) -> str:
+def ai(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=build_prompt(cards),
+        contents=build_prompt(cards, tiragem_name),
     )
     return (response.text or "").strip()
 
@@ -350,12 +384,35 @@ def selected_cards_text(cards: List[Dict[str, Any]], max_cards: int = MAX_CARDS)
     lines.append(f"Total: {len(cards)}/{max_cards}")
     return "\n".join(lines)
 
+
+def tiragens_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(TIRAGENS["dia"]["label"], callback_data="tir:dia")],
+        [InlineKeyboardButton(TIRAGENS["pf"]["label"], callback_data="tir:pf")],
+        [InlineKeyboardButton(TIRAGENS["sc"]["label"], callback_data="tir:sc")],
+        [InlineKeyboardButton(TIRAGENS["peladan"]["label"], callback_data="tir:peladan")],
+        [InlineKeyboardButton(TIRAGENS["ferradura"]["label"], callback_data="tir:ferradura")],
+        [InlineKeyboardButton(TIRAGENS["cruz"]["label"], callback_data="tir:cruz")],
+        [InlineKeyboardButton(TIRAGENS["mandala12"]["label"], callback_data="tir:mandala12")],
+        [InlineKeyboardButton(TIRAGENS["mandala13"]["label"], callback_data="tir:mandala13")],
+        [InlineKeyboardButton("🔙 Voltar", callback_data="tirback")],
+    ])
+
+
+def tiragem_mandala_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🪐 Mandala 12", callback_data="tir:mandala12")],
+        [InlineKeyboardButton("🪐 Mandala 13", callback_data="tir:mandala13")],
+        [InlineKeyboardButton("🔙 Voltar", callback_data="tirback")],
+    ])
+
 # ---------------- BOT ----------------
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔮 Tarot\n\nEscolha:",
+        "🔮 <b>TAROT RWS</b>\n\nEscolha uma opção:",
         reply_markup=menu_grupos(),
+        parse_mode="HTML",
     )
 
 
@@ -365,7 +422,7 @@ async def ler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await delete_session(update.effective_user.id)
-    await update.message.reply_text("Resetado")
+    await update.message.reply_text("♻️ Sessão resetada.")
 
 
 async def buscar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -385,18 +442,18 @@ async def buscar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def tirar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    args = ctx.args or []
-    try:
-        n = int(args[0]) if args else 3
-    except Exception:
-        n = 3
+    await update.message.reply_text(
+        "🎲 <b>Escolha a tiragem</b>\n\nDepois que você selecionar, eu sorteio as cartas, envio as imagens e monto a interpretação.",
+        reply_markup=tiragens_menu(),
+        parse_mode="HTML",
+    )
 
-    n = max(1, min(n, MAX_CARDS))
 
-    cards = random.sample(ALL_CARDS, n)
+async def _run_tiragem(chat_id: int, uid: int, tiragem_id: str, tiragem_name: str, count: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cards = random.sample(ALL_CARDS, count)
     result = [{"name": c, "rev": random.choice([True, False])} for c in cards]
 
-    await save_session(update.effective_user.id, {
+    await save_session(uid, {
         "cards": result,
         "group": None,
         "page": 0,
@@ -404,35 +461,54 @@ async def tirar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "updated_at": time.time(),
     })
 
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text=f"🎴 <b>{html.escape(tiragem_name)}</b>\n\n🔎 Cartas sorteadas: <b>{count}</b>",
+        parse_mode="HTML",
+    )
+
     for c in result:
         img = find_image(c["name"])
         if img:
             b = render_image(img, c["rev"])
             await ctx.bot.send_photo(
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 photo=InputFile(b),
+                caption=f"🃏 {html.escape(c['name'])} ({'invertida' if c['rev'] else 'normal'})",
+                parse_mode="HTML",
             )
         else:
             await ctx.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"🃏 {c['name']} ({'invertida' if c['rev'] else 'normal'})",
+                chat_id=chat_id,
+                text=f"🃏 <b>{html.escape(c['name'])}</b> ({'invertida' if c['rev'] else 'normal'})",
+                parse_mode="HTML",
             )
 
     try:
-        res = await asyncio.to_thread(ai, result)
+        res = await asyncio.to_thread(ai, result, tiragem_name)
     except Exception:
         logger.exception("Erro ao gerar interpretação do Gemini")
         res = "Erro ao gerar interpretação."
 
-    for part in split_text(res):
-        await ctx.bot.send_message(chat_id=update.effective_chat.id, text=part)
+    partes = split_text(res)
+    if not partes:
+        partes = ["Sem resposta de interpretação no momento."]
+
+    for p in partes:
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=prepare_telegram_html(p.strip()),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
     await ctx.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova.",
+        chat_id=chat_id,
+        text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova leitura.",
+        parse_mode="HTML",
     )
 
-    await delete_session(update.effective_user.id)
+    await delete_session(uid)
 
 
 async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -444,6 +520,33 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     s = await load_session(uid)
     data = q.data or ""
+
+    if data == "tirback":
+        await q.edit_message_text(
+            "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.",
+            reply_markup=tiragens_menu(),
+            parse_mode="HTML",
+        )
+        return
+
+    if data.startswith("tir:"):
+        tir_id = data.split(":", 1)[1]
+        if tir_id not in TIRAGENS:
+            await q.answer("Tiragem inválida.", show_alert=True)
+            return
+
+        if tir_id == "mandala12":
+            await q.edit_message_text(
+                "🪐 <b>Mandala Astrológica</b>\n\nEscolha a quantidade de cartas:",
+                reply_markup=tiragem_mandala_kb(),
+                parse_mode="HTML",
+            )
+            return
+
+        tiragem_name = TIRAGENS[tir_id]["prompt_name"]
+        count = TIRAGENS[tir_id]["count"]
+        await _run_tiragem(q.message.chat.id, uid, tir_id, tiragem_name, count, ctx)
+        return
 
     if data.startswith("g:"):
         g = data.split(":", 1)[1]
@@ -478,7 +581,11 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         card = data.split(":", 1)[1]
         s["pending"] = card
         await save_session(uid, s)
-        await q.edit_message_text(f"{card}\n\nPosição?", reply_markup=pos_kb())
+        await q.edit_message_text(
+            f"🃏 <b>{html.escape(card)}</b>\n\nEscolha a posição:",
+            reply_markup=pos_kb(),
+            parse_mode="HTML",
+        )
         return
 
     if data.startswith("p:"):
@@ -526,11 +633,12 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 await ctx.bot.send_message(
                     chat_id=q.message.chat.id,
-                    text=f"🃏 {c['name']} ({'invertida' if c['rev'] else 'normal'})",
+                    text=f"🃏 <b>{html.escape(c['name'])}</b> ({'invertida' if c['rev'] else 'normal'})",
+                    parse_mode="HTML",
                 )
 
         try:
-            res = await asyncio.to_thread(ai, cards)
+            res = await asyncio.to_thread(ai, cards, None)
         except Exception:
             logger.exception("Erro ao gerar interpretação do Gemini")
             res = "Erro ao gerar interpretação."
@@ -540,11 +648,17 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             partes = ["Sem resposta de interpretação no momento."]
 
         for p in partes:
-            await ctx.bot.send_message(chat_id=q.message.chat.id, text=p.strip())
+            await ctx.bot.send_message(
+                chat_id=q.message.chat.id,
+                text=prepare_telegram_html(p.strip()),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
 
         await ctx.bot.send_message(
             chat_id=q.message.chat.id,
-            text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova.",
+            text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova leitura.",
+            parse_mode="HTML",
         )
 
         await delete_session(uid)
