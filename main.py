@@ -5,12 +5,16 @@ import logging
 import math
 import os
 import re
+import unicodedata
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google import genai
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from PIL import Image, ImageOps
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import BadRequest
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 logging.basicConfig(
     level=logging.INFO,
@@ -124,6 +128,125 @@ DECK_LABELS = {
     "cigano": "Baralho Cigano",
 }
 
+IMAGE_ROOT = Path(os.getenv("RWS_IMAGE_DIR", "assets/rws"))
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+RWS_IMAGE_INDEX: Dict[str, Path] = {}
+
+RWS_MAJOR_IMAGE_STEMS = {
+    "O Louco": "TarotRWS-00-louco",
+    "O Mago": "TarotRWS-01-mago",
+    "A Sacerdotisa": "TarotRWS-02-alta-sacerdotisa",
+    "A Imperatriz": "TarotRWS-03-imperatriz",
+    "O Imperador": "TarotRWS-04-imperador",
+    "O Hierofante": "TarotRWS-05-hierofante",
+    "Os Enamorados": "TarotRWS-06-enamorados",
+    "O Carro": "TarotRWS-07-carro",
+    "A Força": "TarotRWS-08-forca",
+    "O Eremita": "TarotRWS-09-eremita",
+    "A Roda da Fortuna": "TarotRWS-10-roda",
+    "A Justiça": "TarotRWS-11-justica",
+    "O Enforcado": "TarotRWS-12-pendurado",
+    "A Morte": "TarotRWS-13-morte",
+    "A Temperança": "TarotRWS-14-temperanca",
+    "O Diabo": "TarotRWS-15-diabo",
+    "A Torre": "TarotRWS-16-torre",
+    "A Estrela": "TarotRWS-17-estrela",
+    "A Lua": "TarotRWS-18-lua",
+    "O Sol": "TarotRWS-19-sol",
+    "O Julgamento": "TarotRWS-20-julgamento",
+    "O Mundo": "TarotRWS-21-mundo",
+}
+
+RWS_MINOR_IMAGE_STEMS: Dict[str, str] = {}
+
+
+def slugify(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-")
+
+
+def build_minor_image_stems() -> None:
+    RWS_MINOR_IMAGE_STEMS.clear()
+    for suit in TAROT_SUITS:
+        for idx, rank in enumerate(TAROT_MINOR_RANKS, 1):
+            card_name = f"{rank} de {suit}"
+            RWS_MINOR_IMAGE_STEMS[card_name] = f"TarotRWS-{suit}-{idx:02d}"
+
+
+def build_rws_image_index() -> Dict[str, Path]:
+    index: Dict[str, Path] = {}
+    if not IMAGE_ROOT.exists():
+        logger.warning("Pasta de imagens não encontrada: %s", IMAGE_ROOT)
+        return index
+
+    for file_path in IMAGE_ROOT.rglob("*"):
+        if file_path.is_file() and file_path.suffix.lower() in IMAGE_EXTENSIONS:
+            index[slugify(file_path.stem)] = file_path
+
+    logger.info("Índice de imagens carregado: %d arquivos em %s", len(index), IMAGE_ROOT)
+    return index
+
+
+def find_card_image_path(deck: str, card_name: str) -> Optional[Path]:
+    if deck != "tarot":
+        return None
+
+    candidate_stems: List[str] = []
+    if card_name in RWS_MAJOR_IMAGE_STEMS:
+        candidate_stems.append(RWS_MAJOR_IMAGE_STEMS[card_name])
+    if card_name in RWS_MINOR_IMAGE_STEMS:
+        candidate_stems.append(RWS_MINOR_IMAGE_STEMS[card_name])
+
+    candidate_stems.extend([
+        card_name,
+        slugify(card_name),
+        f"TarotRWS-{slugify(card_name)}",
+    ])
+
+    for stem in candidate_stems:
+        path = RWS_IMAGE_INDEX.get(slugify(stem))
+        if path:
+            return path
+    return None
+
+
+def render_card_photo_bytes(image_path: Path, reversed_card: bool) -> BytesIO:
+    with Image.open(image_path) as img:
+        img = ImageOps.exif_transpose(img)
+        if reversed_card:
+            img = img.rotate(180, expand=True)
+        output = BytesIO()
+        img.save(output, format="PNG")
+        output.seek(0)
+        return output
+
+
+async def send_card_image(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    card: Dict[str, Any],
+    prefix: str = "Carta",
+) -> bool:
+    image_path = find_card_image_path(card.get("deck", ""), card.get("name", ""))
+    if not image_path:
+        return False
+
+    try:
+        photo_bytes = await asyncio.to_thread(render_card_photo_bytes, image_path, bool(card.get("reversed")))
+        caption = f"{prefix}: {card.get('name', 'Carta')} ({'invertida' if card.get('reversed') else 'normal'})"
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(photo_bytes, filename=f"{slugify(card.get('name', 'carta'))}.png"),
+            caption=caption[:1024],
+        )
+        return True
+    except Exception:
+        logger.exception("Falha ao enviar imagem da carta: %s", card.get("name"))
+        return False
+
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -180,6 +303,9 @@ if not GEMINI_API_KEY:
     raise RuntimeError("Defina GEMINI_API_KEY ou GOOGLE_API_KEY.")
 
 GENAI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
+
+build_minor_image_stems()
+RWS_IMAGE_INDEX = build_rws_image_index()
 
 
 def normalize_public_url(raw: str) -> str:
@@ -570,6 +696,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         cards_result = result.get("cards") or []
         if not cards_result:
             for card in cards:
+                await send_card_image(context, query.message.chat_id, card, prefix="Carta tirada")
                 msg = (
                     f"• {card['name']} ({'invertida' if card['reversed'] else 'normal'})\n"
                     "Significado: não retornado pela IA.\n"
@@ -579,8 +706,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await send_split_message(query.message.chat_id, msg, context)
         else:
             for i, item in enumerate(cards_result, 1):
+                source_card = cards[i - 1] if i - 1 < len(cards) else {
+                    "deck": "tarot",
+                    "name": item.get("name", "Carta"),
+                    "reversed": False,
+                }
+                await send_card_image(context, query.message.chat_id, source_card, prefix=f"Carta {i}")
                 msg = (
-                    f"📍 Carta {i} — {item.get('name', 'Carta')}\n"
+                    f"📍 Carta {i} — {item.get('name', source_card.get('name', 'Carta'))}\n"
                     f"Significado: {item.get('meaning', '')}\n"
                     f"Ponto positivo: {item.get('positive', '')}\n"
                     f"Ponto negativo: {item.get('negative', '')}"
