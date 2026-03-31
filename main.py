@@ -228,6 +228,10 @@ def markdown_to_html(text: str) -> str:
 
 
 def prepare_telegram_html(text: str) -> str:
+    # Correção: remover tags inválidas que a IA possa inventar
+    text = text.replace("<tg-b>", "<b>").replace("</tg-b>", "</b>")
+    text = text.replace("<tg-i>", "<i>").replace("</tg-i>", "</i>")
+    
     converted = markdown_to_html(text)
     escaped = html.escape(converted)
     for tag in ("b", "/b", "i", "/i", "u", "/u"):
@@ -244,7 +248,7 @@ async def send_split_message(chat_id: int, text: str, context: ContextTypes.DEFA
             disable_web_page_preview=True,
         )
 
-# ---------------- SESSÃO ----------------# ---------------- SESSÃO ----------------
+# ---------------- SESSÃO ----------------
 
 def _default_session() -> Dict[str, Any]:
     return {
@@ -361,7 +365,8 @@ def build_prompt(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None
     return f"""
 Você é um intérprete didático de tarot.
 
-{tiragem_line}{('Regra da tiragem: ' + tiragem_rules + '\n') if tiragem_rules else ''}Responda em PORTUGUÊS DO BRASIL e use APENAS HTML do Telegram para formatação.
+{tiragem_line}{('Regra da tiragem: ' + tiragem_rules + '\n') if tiragem_rules else ''}Responda em PORTUGUÊS DO BRASIL e use APENAS HTML do Telegram para formatação (<b>, <i>).
+NUNCA invente tags como <tg-b> ou <tg-i>.
 Não use asteriscos literais para negrito ou itálico.
 Use emojis relacionados ao conteúdo.
 Use este formato:
@@ -788,7 +793,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await delete_session(uid)
         return
-# ---------------- MAIN ----------------# ---------------- MAIN ----------------
+# ---------------- MAIN ----------------
 
 async def post_init(app: Application):
     app.bot_data["cleanup_task"] = asyncio.create_task(cleanup_sessions_task())
