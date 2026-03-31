@@ -5,9 +5,6 @@ import logging
 import os
 import random
 import re
-import shutil
-import tempfile
-import zipfile
 import time
 import unicodedata
 from io import BytesIO
@@ -17,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import redis.asyncio as redis
 from google import genai
 from PIL import Image, ImageOps
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputSticker, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 logging.basicConfig(
@@ -40,12 +37,8 @@ CARDS_PER_PAGE = 8
 
 SESSIONS: Dict[int, Dict[str, Any]] = {}
 
-IMAGE_ROOT = Path(os.getenv("RWS_IMAGE_DIR", "/rss/rws"))
-STICKER_ROOT = Path(os.getenv("TIGROT_STICKER_DIR", "assets/rws-png"))
+IMAGE_ROOT = Path(os.getenv("RWS_IMAGE_DIR", "assets/rws"))
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-TIGROT_PACK_NAME = os.getenv("TIGROT_PACK_NAME", "TIGROT").strip() or "TIGROT"
-TIGROT_PACK_DISPLAY_NAME = os.getenv("TIGROT_PACK_DISPLAY_NAME", "/TIGROT").strip() or "/TIGROT"
-TIGROT_PACK_URL = os.getenv("TIGROT_PACK_URL", "").strip()
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
@@ -119,13 +112,6 @@ TIRAGENS = {
     },
 }
 
-MAJOR_NUMBERS = {name: i for i, name in enumerate(TAROT_MAJOR)}
-MAJOR_ALIASES: Dict[str, List[str]] = {
-    "A Sacerdotisa": ["alta-sacerdotisa", "sacerdotisa-alta"],
-    "A Roda da Fortuna": ["roda", "roda-da-fortuna"],
-    "O Enforcado": ["pendurado", "enforcado-pendurado"],
-}
-
 RWS_MAJOR_IMAGE_STEMS = {
     "O Louco": "TarotRWS-00-louco",
     "O Mago": "TarotRWS-01-mago",
@@ -165,101 +151,42 @@ def slugify(v: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", v.lower()).strip("-")
 
 
-def build_index(root: Path) -> Dict[str, Path]:
+def build_index() -> Dict[str, Path]:
     idx: Dict[str, Path] = {}
-    if not root.exists():
-        logger.warning("Pasta de imagens não encontrada: %s", root)
+    if not IMAGE_ROOT.exists():
+        logger.warning("Pasta de imagens não encontrada: %s", IMAGE_ROOT)
         return idx
 
-    for f in root.rglob("*"):
+    for f in IMAGE_ROOT.rglob("*"):
         if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
             idx[slugify(f.stem)] = f
 
-    logger.info("Índice de imagens carregado: %d arquivos em %s", len(idx), root)
+    logger.info("Índice de imagens carregado: %d arquivos em %s", len(idx), IMAGE_ROOT)
     return idx
 
 
-PHOTO_INDEX = build_index(IMAGE_ROOT)
-STICKER_INDEX = build_index(STICKER_ROOT)
-IMAGE_INDEX = PHOTO_INDEX
-
-
-def _strip_articles(name: str) -> str:
-    return re.sub(r"^(?:o|a|os|as)\s+", "", name.strip(), flags=re.I)
-
-
-def card_stem_candidates(card_name: str) -> List[str]:
-    name = card_name.strip()
-    candidates: List[str] = []
-
-    if name in MAJOR_NUMBERS:
-        num = MAJOR_NUMBERS[name]
-        clean = _strip_articles(name)
-        slug_clean = slugify(clean)
-        slug_full = slugify(name)
-        candidates.extend([
-            f"{num:02d}-{slug_clean}",
-            f"{num:02d}-{slug_full}",
-            f"TarotRWS-{num:02d}-{slug_clean}",
-            f"TarotRWS-{num:02d}-{slug_full}",
-        ])
-        for alias in MAJOR_ALIASES.get(name, []):
-            candidates.extend([
-                f"{num:02d}-{alias}",
-                f"TarotRWS-{num:02d}-{alias}",
-            ])
-    else:
-        if " de " in name:
-            rank, suit = name.split(" de ", 1)
-            rank = rank.strip()
-            suit = suit.strip()
-            rank_slug = slugify(rank)
-            suit_slug = slugify(suit)
-            if rank in RANKS and suit in SUITS:
-                idx = RANKS.index(rank) + 1
-                candidates.extend([
-                    f"{suit}-{idx:02d}",
-                    f"{suit}-{idx}",
-                    f"{suit}-{rank}",
-                    f"{suit}-{rank_slug}",
-                    f"{suit_slug}-{idx:02d}",
-                    f"{suit_slug}-{rank_slug}",
-                    f"TarotRWS-{suit}-{idx:02d}",
-                ])
-
-    candidates.extend([
-        name,
-        slugify(name),
-        f"TarotRWS-{slugify(name)}",
-    ])
-
-    ordered: List[str] = []
-    seen = set()
-    for candidate in candidates:
-        key = slugify(candidate)
-        if key and key not in seen:
-            seen.add(key)
-            ordered.append(candidate)
-    return ordered
-
-
-def find_media(card_name: str, prefer_sticker: bool = True) -> Optional[Path]:
-    indexes = (STICKER_INDEX, PHOTO_INDEX) if prefer_sticker else (PHOTO_INDEX, STICKER_INDEX)
-    for stem in card_stem_candidates(card_name):
-        key = slugify(stem)
-        for idx in indexes:
-            path = idx.get(key)
-            if path:
-                return path
-    return None
-
-
-def find_sticker(card_name: str) -> Optional[Path]:
-    return find_media(card_name, prefer_sticker=True)
+IMAGE_INDEX = build_index()
 
 
 def find_image(card_name: str) -> Optional[Path]:
-    return find_media(card_name, prefer_sticker=False)
+    candidate_stems: List[str] = []
+
+    if card_name in RWS_MAJOR_IMAGE_STEMS:
+        candidate_stems.append(RWS_MAJOR_IMAGE_STEMS[card_name])
+    if card_name in RWS_MINOR_IMAGE_STEMS:
+        candidate_stems.append(RWS_MINOR_IMAGE_STEMS[card_name])
+
+    candidate_stems.extend([
+        card_name,
+        f"TarotRWS-{slugify(card_name)}",
+        slugify(card_name),
+    ])
+
+    for stem in candidate_stems:
+        path = IMAGE_INDEX.get(slugify(stem))
+        if path:
+            return path
+    return None
 
 
 def render_image(path: Path, rev: bool) -> BytesIO:
@@ -292,239 +219,598 @@ def split_text(text: str, limit: int = 3800) -> List[str]:
 
 
 
-def pack_sticker_emoji(card_name: str) -> str:
-    if card_name in TAROT_MAJOR:
-        return "🔮"
-    if "de Copas" in card_name:
-        return "❤️"
-    if "de Paus" in card_name:
-        return "🔥"
-    if "de Espadas" in card_name:
-        return "⚔️"
-    if "de Ouros" in card_name:
-        return "💰"
-    return "🃏"
+def markdown_to_html(text: str) -> str:
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
+    text = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<i>\1</i>", text)
+    return text
 
 
-def build_tigrot_pack_zip() -> tuple[Path, Path]:
-    if not STICKER_ROOT.exists():
-        raise FileNotFoundError(f"Pasta de stickers não encontrada: {STICKER_ROOT}")
+def prepare_telegram_html(text: str) -> str:
+    # Correção: remover tags inválidas que a IA possa inventar
+    text = text.replace("<tg-b>", "<b>").replace("</tg-b>", "</b>")
+    text = text.replace("<tg-i>", "<i>").replace("</tg-i>", "</i>")
+    
+    converted = markdown_to_html(text)
+    escaped = html.escape(converted)
+    for tag in ("b", "/b", "i", "/i", "u", "/u"):
+        escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
+    return escaped
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="tigrot_pack_"))
-    zip_path = tmpdir / f"{TIGROT_PACK_NAME}.zip"
-    manifest: List[Dict[str, Any]] = []
 
-    readme = f"""Pacote de stickers {TIGROT_PACK_DISPLAY_NAME}
-
-Como usar:
-1. Abra o bot @Stickers no Telegram.
-2. Crie um novo pacote.
-3. Envie as imagens deste pacote na ordem que preferir.
-4. Associe um emoji por sticker, usando o padrão sugerido no manifesto.
-
-Origem: {STICKER_ROOT.as_posix()}
-"""
-
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for card in ALL_CARDS:
-            src = find_sticker(card)
-            if not src:
-                continue
-            zf.write(src, arcname=src.name)
-            manifest.append({
-                "card": card,
-                "file": src.name,
-                "emoji": pack_sticker_emoji(card),
-            })
-        zf.writestr("README.txt", readme)
-        zf.writestr(
-            "manifest.json",
-            json.dumps(
-                {
-                    "pack_display_name": TIGROT_PACK_DISPLAY_NAME,
-                    "pack_name": TIGROT_PACK_NAME,
-                    "source": STICKER_ROOT.as_posix(),
-                    "items": manifest,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+async def send_split_message(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    for part in split_text(text):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=prepare_telegram_html(part),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
 
-    return zip_path, tmpdir
+# ---------------- SESSÃO ----------------
+
+def _default_session() -> Dict[str, Any]:
+    return {
+        "cards": [],
+        "group": None,
+        "page": 0,
+        "pending": None,
+        "updated_at": time.time(),
+    }
 
 
-def tigrot_help_text() -> str:
-    return (
-        f"🎨 <b>{html.escape(TIGROT_PACK_DISPLAY_NAME)}</b>\n\n"
-        "Este pacote foi preparado com as artes de <b>/assets/rws-png</b> e pode ser criado automaticamente como sticker set do Telegram.\n\n"
-        "Fluxo recomendado:\n"
-        "1. Baixe o ZIP.\n"
-        "2. Abra o @Stickers.\n"
-        "3. Crie um novo pacote.\n"
-        "4. Ou use /criarpack para gerar o pacote automaticamente.\n"
-        "5. Atribua os emojis sugeridos no manifesto, se preferir ajustar manualmente.\n\n"
-        "Melhorias úteis para o fluxo atual:\n"
-        "• usar um emoji padrão por naipe nos arcanos menores;\n"
-        "• destacar invertidas com um sticker espelhado;\n"
-        "• criar respostas rápidas com sticker para finalização positiva, alerta e conselho;\n"
-        "• mostrar uma prévia em sticker antes da leitura final."
-    )
+def _sanitize_session(data: Dict[str, Any]) -> Dict[str, Any]:
+    base = _default_session()
+    base.update({
+        "cards": data.get("cards", []),
+        "group": data.get("group"),
+        "page": int(data.get("page", 0) or 0),
+        "pending": data.get("pending"),
+        "updated_at": float(data.get("updated_at", time.time()) or time.time()),
+    })
+    return base
 
 
-def tigrot_menu_kb() -> InlineKeyboardMarkup:
-    rows = []
-    if TIGROT_PACK_URL:
-        rows.append([InlineKeyboardButton("➕ Abrir pacote", url=TIGROT_PACK_URL)])
-    rows.extend(
-        [
-            [InlineKeyboardButton("📦 Baixar ZIP", callback_data="tigrot:zip")],
-            [InlineKeyboardButton("🧾 Como adicionar", callback_data="tigrot:help")],
-            [InlineKeyboardButton("🖼️ Ver amostras", callback_data="tigrot:sample")],
-            [InlineKeyboardButton("🧱 Criar pack", callback_data="tigrot:create")],
-            [InlineKeyboardButton("🔙 Voltar", callback_data="tigrot:back")],
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
+async def load_session(uid: int) -> Dict[str, Any]:
+    session = SESSIONS.get(uid)
+    if session:
+        session["updated_at"] = time.time()
+        return session
+
+    if redis_client:
+        try:
+            raw = await redis_client.get(f"session:{uid}")
+            if raw:
+                session = _sanitize_session(json.loads(raw))
+                session["updated_at"] = time.time()
+                SESSIONS[uid] = session
+                return session
+        except Exception:
+            logger.exception("Falha ao carregar sessão do Redis para uid=%s", uid)
+
+    session = _default_session()
+    SESSIONS[uid] = session
+    return session
 
 
-async def send_tigrot_zip(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    zip_path, tmpdir = build_tigrot_pack_zip()
-    try:
-        with zip_path.open("rb") as fp:
-            await ctx.bot.send_document(
-                chat_id=chat_id,
-                document=InputFile(fp, filename=zip_path.name),
-                caption=(
-                    f"📦 Pacote {html.escape(TIGROT_PACK_DISPLAY_NAME)} pronto.\n"
-                    "Use o arquivo como base para criar o pacote no @Stickers."
-                ),
-                parse_mode="HTML",
+async def save_session(uid: int, session: Dict[str, Any]) -> None:
+    session["updated_at"] = time.time()
+    SESSIONS[uid] = session
+    if redis_client:
+        try:
+            await redis_client.set(
+                f"session:{uid}",
+                json.dumps(session, ensure_ascii=False),
+                ex=REDIS_TTL_SECONDS,
             )
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            logger.exception("Falha ao salvar sessão no Redis para uid=%s", uid)
 
 
-def _sticker_set_name(bot_username: str) -> str:
-    safe = re.sub(r"[^a-z0-9_]+", "", (bot_username or "").lower())
-    prefix = re.sub(r"[^a-z0-9_]+", "", slugify(TIGROT_PACK_NAME).replace("-", "_"))
-    return f"{prefix}_by_{safe}" if safe else prefix
+async def delete_session(uid: int) -> None:
+    SESSIONS.pop(uid, None)
+    if redis_client:
+        try:
+            await redis_client.delete(f"session:{uid}")
+        except Exception:
+            logger.exception("Falha ao excluir sessão no Redis para uid=%s", uid)
 
 
-async def _build_input_stickers() -> tuple[List[InputSticker], List[InputSticker], List[Path]]:
-    stickers: List[InputSticker] = []
-    deferred: List[InputSticker] = []
-    paths_used: List[Path] = []
+async def cleanup_sessions_task() -> None:
+    while True:
+        try:
+            now = time.time()
+            expired = [
+                uid for uid, data in list(SESSIONS.items())
+                if now - float(data.get("updated_at", now)) > SESSION_MAX_AGE_SECONDS
+            ]
+            for uid in expired:
+                SESSIONS.pop(uid, None)
+        except Exception:
+            logger.exception("Falha na limpeza automática de sessões")
+        await asyncio.sleep(SESSION_CLEANUP_SECONDS)
 
-    for card in ALL_CARDS:
-        src = find_sticker(card)
-        if not src or src.suffix.lower() not in {".png", ".webp"}:
-            continue
+# ---------------- GEMINI ----------------
 
-        paths_used.append(src)
-        emoji = pack_sticker_emoji(card)
-        sticker = InputSticker(sticker=src.read_bytes(), emoji_list=[emoji], format="static")
-        if len(stickers) < 50:
-            stickers.append(sticker)
-        else:
-            deferred.append(sticker)
+if not BOT_TOKEN:
+    raise RuntimeError("Defina a variável de ambiente BOT_TOKEN.")
+if not GEMINI_API_KEY:
+    raise RuntimeError("Defina GEMINI_API_KEY ou GOOGLE_API_KEY.")
 
-    return stickers, deferred, paths_used
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-async def create_tigrot_pack(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
+
+
+def build_prompt(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
+    txt = "\n".join(
+        f"{i + 1}. {c['name']} ({'invertida' if c['rev'] else 'normal'})"
+        for i, c in enumerate(cards)
+    )
+
+    tiragem_line = f"Tiragem: {tiragem_name}\n" if tiragem_name else ""
+
+    tiragem_rules = ""
+    if tiragem_name == "Carta do Dia / Sim ou Não":
+        tiragem_rules = (
+            "Seja direto, objetivo e conclusivo. "
+            "Trate a resposta como curta e prática."
+        )
+    elif tiragem_name in {"Passado, Presente e Futuro", "Situação, Desafio e Conselho"}:
+        tiragem_rules = "Organize a leitura em sequência lógica, mostrando a evolução entre as posições."
+    elif tiragem_name in {"Tiragem Péladan", "Ferradura", "Cruz Celta", "Mandala Astrológica"}:
+        tiragem_rules = "Aprofunde as interações entre cartas, tensões, obstáculos e desfechos com bastante contexto."
+
+    return f"""
+Você é um intérprete didático de tarot.
+
+{tiragem_line}{('Regra da tiragem: ' + tiragem_rules + '\n') if tiragem_rules else ''}Responda em PORTUGUÊS DO BRASIL e use APENAS HTML do Telegram para formatação (<b>, <i>).
+NUNCA invente tags como <tg-b> ou <tg-i>.
+Não use asteriscos literais para negrito ou itálico.
+Use emojis relacionados ao conteúdo.
+Use este formato:
+
+<b>🃏 Carta 1 — NOME</b>
+<i>Significado:</i> ...
+<i>Ponto positivo:</i> ...
+<i>Ponto negativo:</i> ...
+
+<b>🔗 Combinações</b>
+...
+
+<b>🌙 Visão global</b>
+...
+
+Regras:
+- Não omita aspectos negativos.
+- Não suavize o que for difícil.
+- Não afirme certezas absolutas.
+- Seja claro, direto e didático.
+- Se a carta estiver invertida, interprete isso de forma explícita.
+- Traga a leitura por tiragem quando houver nome informado.
+- Termine com uma sensação de fechamento coerente com a tiragem.
+
+Cartas:
+{txt}
+""".strip()
+
+
+def ai(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=build_prompt(cards, tiragem_name),
+    )
+    return (response.text or "").strip()
+
+def menu_grupos() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🃏 Arcanos Maiores", callback_data="g:major")],
+        [InlineKeyboardButton("❤️ Copas", callback_data="g:Copas")],
+        [InlineKeyboardButton("🔥 Paus", callback_data="g:Paus")],
+        [InlineKeyboardButton("⚔️ Espadas", callback_data="g:Espadas")],
+        [InlineKeyboardButton("💰 Ouros", callback_data="g:Ouros")],
+    ])
+
+
+def menu_cartas(group: str, page: int) -> InlineKeyboardMarkup:
+    cards = TAROT_MAJOR if group == "major" else MINOR[group]
+    start = page * CARDS_PER_PAGE
+    subset = cards[start:start + CARDS_PER_PAGE]
+
+    kb = [[InlineKeyboardButton(c, callback_data=f"c:{c}")] for c in subset]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"nav:{group}:{page - 1}"))
+    if start + CARDS_PER_PAGE < len(cards):
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"nav:{group}:{page + 1}"))
+    if nav:
+        kb.append(nav)
+
+    kb.append([InlineKeyboardButton("🔙 Voltar", callback_data="back")])
+    return InlineKeyboardMarkup(kb)
+
+
+def pos_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬆️ Normal", callback_data="p:n")],
+        [InlineKeyboardButton("⬇️ Invertida", callback_data="p:r")],
+    ])
+
+
+def selected_cards_text(cards: List[Dict[str, Any]], max_cards: int = MAX_CARDS) -> str:
+    lines = [
+        f"{i + 1}. {c['name']} ({'invertida' if c['rev'] else 'normal'})"
+        for i, c in enumerate(cards)
+    ]
+    lines.append("")
+    lines.append(f"Total: {len(cards)}/{max_cards}")
+    return "\n".join(lines)
+
+
+def tiragens_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(TIRAGENS["dia"]["label"], callback_data="tir:dia")],
+        [InlineKeyboardButton(TIRAGENS["pf"]["label"], callback_data="tir:pf")],
+        [InlineKeyboardButton(TIRAGENS["sc"]["label"], callback_data="tir:sc")],
+        [InlineKeyboardButton(TIRAGENS["peladan"]["label"], callback_data="tir:peladan")],
+        [InlineKeyboardButton(TIRAGENS["ferradura"]["label"], callback_data="tir:ferradura")],
+        [InlineKeyboardButton(TIRAGENS["cruz"]["label"], callback_data="tir:cruz")],
+        [InlineKeyboardButton("🪐 Mandala Astrológica", callback_data="tir:mandala")],
+        [InlineKeyboardButton("🔙 Voltar", callback_data="tirback")],
+    ])
+
+
+def tiragem_mandala_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(TIRAGENS["mandala12"]["label"], callback_data="tir:mandala12")],
+        [InlineKeyboardButton(TIRAGENS["mandala13"]["label"], callback_data="tir:mandala13")],
+        [InlineKeyboardButton("🔙 Voltar", callback_data="tirback")],
+    ])
+
+
+def tiragem_confirm_kb(tir_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirmar", callback_data=f"tirrun:{tir_id}")],
+        [InlineKeyboardButton("🔙 Cancelar", callback_data=f"tircancel:{tir_id}")],
+    ])
+
+
+def tiragem_preview_text(tir_id: str) -> str:
+    info = TIRAGENS[tir_id]
+    return (
+        f"🎲 <b>{html.escape(info['label'])}</b>\n\n"
+        f"{html.escape(info['description'])}\n\n"
+        f"🃏 Quantidade de cartas: <b>{info['count']}</b>\n\n"
+        "Confirma para iniciar a tiragem?"
+    )
+# ---------------- BOT ----------------
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔮 <b>Bem-vindo ao Tarot Interativo</b>\n\n"
+        "Aqui você pode explorar o <b>Tarot Rider-Waite</b> de forma clara, intuitiva e completa.\n\n"
+        "<b>Comandos disponíveis:</b>\n"
+        "/ler - 🃏 <b>Escolher cartas manualmente:</b> Selecione você mesmo as cartas e suas posições (normal ou invertida) para uma leitura personalizada.\n"
+        "/tirar - 🎲 <b>Fazer tiragem automática guiada:</b> Escolha um método de tiragem e o bot sorteará e interpretará as cartas para você.\n"
+        "/buscar - 🔎 <b>Buscar carta pelo nome:</b> Encontre rapidamente uma carta específica no baralho (ex: /buscar torre).\n"
+        "/reset - ♻️ <b>Limpar sessão atual:</b> Apaga suas seleções atuais e reinicia a leitura do zero.\n\n"
+        "👇 <i>Ou use os botões abaixo para iniciar sua interpretação manualmente</i>",
+        reply_markup=menu_grupos(),
+        parse_mode="HTML"
+    )
+async def ler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🃏 <b>Escolher cartas manualmente</b>\n\n"
+        "Neste modo, você mesmo escolhe as cartas e suas posições (normal ou invertida) para criar uma leitura personalizada.\n\n"
+        "👇 <i>Use os botões abaixo para iniciar sua seleção:</i>",
+        reply_markup=menu_grupos(),
+        parse_mode="HTML"
+    )
+
+
+async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await delete_session(update.effective_user.id)
+    await update.message.reply_text("♻️ Sessão resetada.")
+
+
+async def buscar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Use assim:\n/buscar torre")
         return
 
-    me = await ctx.bot.get_me()
-    set_name = _sticker_set_name(me.username or "")
-    title = TIGROT_PACK_DISPLAY_NAME.strip("/") or TIGROT_PACK_NAME
+    termo = " ".join(ctx.args).strip().lower()
+    matches = [c for c in ALL_CARDS if termo in c.lower()]
 
-    try:
-        initial_stickers, remaining_stickers, used_paths = await _build_input_stickers()
+    if not matches:
+        await update.message.reply_text("Nenhuma carta encontrada.")
+        return
 
-        if not initial_stickers:
-            await update.message.reply_text(
-                "⚠️ Não encontrei arquivos PNG/WebP suficientes em /assets/rws-png para criar o pacote."
-            )
-            return
-
-        await ctx.bot.create_new_sticker_set(
-            user_id=update.effective_user.id,
-            name=set_name,
-            title=title,
-            stickers=initial_stickers,
-        )
-
-        for sticker in remaining_stickers:
-            await ctx.bot.add_sticker_to_set(
-                user_id=update.effective_user.id,
-                name=set_name,
-                sticker=sticker,
-            )
-
-        await update.message.reply_text(
-            f"✅ Pack criado com sucesso: https://t.me/addstickers/{set_name}\n"
-            f"🃏 Cartas incluídas: {len(used_paths)}"
-        )
-    except Exception as e:
-        logger.exception("Falha ao criar o pack TIGROT")
-        await update.message.reply_text(f"Erro ao criar o pack TIGROT: {e}")
+    text = "🔎 Resultados:\n\n" + "\n".join(f"• {c}" for c in matches[:20])
+    await update.message.reply_text(text)
 
 
-async def send_tigrot_samples(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    sample_cards = [
-        "O Louco",
-        "A Sacerdotisa",
-        "O Carro",
-        "O Sol",
-        "Ás de Copas",
-        "Dez de Espadas",
-        "Rei de Ouros",
-    ]
-    for card in sample_cards:
-        img = find_sticker(card) or find_image(card)
-        if not img:
-            continue
-        if img.suffix.lower() in {".png", ".webp"}:
-            await ctx.bot.send_sticker(chat_id=chat_id, sticker=img)
-        else:
-            b = render_image(img, False)
+
+
+async def tirar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎲 <b>Escolha a tiragem</b>\n\n"
+        "Selecione um formato abaixo para eu preparar a leitura com o tipo certo de interpretação.",
+        reply_markup=tiragens_menu(),
+        parse_mode="HTML",
+    )
+async def _run_tiragem(chat_id: int, uid: int, tiragem_id: str, tiragem_name: str, count: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cards = random.sample(ALL_CARDS, count)
+    result = [{"name": c, "rev": random.choice([True, False])} for c in cards]
+
+    await save_session(uid, {
+        "cards": result,
+        "group": None,
+        "page": 0,
+        "pending": None,
+        "updated_at": time.time(),
+    })
+
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"🎴 <b>{html.escape(tiragem_name)}</b>\n\n"
+            f"📌 Tiragem selecionada: <b>{html.escape(TIRAGENS[tiragem_id]['label'])}</b>\n"
+            f"🃏 Cartas sorteadas: <b>{count}</b>\n"
+            "🔎 Agora a leitura será enviada em partes."
+        ),
+        parse_mode="HTML",
+    )
+
+    for c in result:
+        img = find_image(c["name"])
+        if img:
+            b = render_image(img, c["rev"])
             await ctx.bot.send_photo(
                 chat_id=chat_id,
                 photo=InputFile(b),
-                caption=f"🧩 {html.escape(card)}",
+                caption=f"🃏 {html.escape(c['name'])} ({'invertida' if c['rev'] else 'normal'})",
+                parse_mode="HTML",
+            )
+        else:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=f"🃏 <b>{html.escape(c['name'])}</b> ({'invertida' if c['rev'] else 'normal'})",
                 parse_mode="HTML",
             )
 
+    try:
+        res = await asyncio.to_thread(ai, result, tiragem_name)
+    except Exception:
+        logger.exception("Erro ao gerar interpretação do Gemini")
+        res = "⚠️ Erro ao gerar interpretação no momento."
 
-async def send_card(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, card: Dict[str, Any]) -> None:
-    path = find_media(card["name"], prefer_sticker=True)
-    if not path:
+    partes = split_text(res)
+    if not partes:
+        partes = ["Sem resposta de interpretação no momento."]
+
+    for p in partes:
         await ctx.bot.send_message(
             chat_id=chat_id,
-            text=f"🃏 <b>{html.escape(card['name'])}</b> ({'invertida' if card['rev'] else 'normal'})",
+            text=prepare_telegram_html(p.strip()),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova leitura.",
+        parse_mode="HTML",
+    )
+
+    await delete_session(uid)
+
+async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+
+    await q.answer()
+    uid = q.from_user.id
+    s = await load_session(uid)
+    data = q.data or ""
+
+    if data == "tirback":
+        await q.edit_message_text(
+            "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.",
+            reply_markup=tiragens_menu(),
             parse_mode="HTML",
         )
         return
 
-    try:
-        if path.suffix.lower() in {".png", ".webp"}:
-            if card["rev"]:
-                with Image.open(path) as img:
-                    img = ImageOps.exif_transpose(img)
-                    img = img.rotate(180, expand=True)
-                    b = BytesIO()
-                    img.save(b, "PNG")
-                    b.seek(0)
-                    await ctx.bot.send_sticker(
-                        chat_id=chat_id,
-                        sticker=InputFile(b, filename=f"{slugify(card['name'])}.png"),
-                    )
-            else:
-                await ctx.bot.send_sticker(chat_id=chat_id, sticker=path)
+    if data == "tir:mandala":
+        await q.edit_message_text(
+            "🪐 <b>Mandala Astrológica</b>\n\nEscolha se deseja 12 ou 13 cartas.",
+            reply_markup=tiragem_mandala_kb(),
+            parse_mode="HTML",
+        )
+        return
+
+    if data.startswith("tir:"):
+        tir_id = data.split(":", 1)[1]
+        if tir_id not in TIRAGENS:
+            await q.answer("Tiragem inválida.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            tiragem_preview_text(tir_id),
+            reply_markup=tiragem_confirm_kb(tir_id),
+            parse_mode="HTML",
+        )
+        return
+
+    if data.startswith("tirrun:"):
+        tir_id = data.split(":", 1)[1]
+        if tir_id not in TIRAGENS:
+            await q.answer("Tiragem inválida.", show_alert=True)
+            return
+
+        info = TIRAGENS[tir_id]
+        await _run_tiragem(
+            q.message.chat.id,
+            uid,
+            tir_id,
+            info["prompt_name"],
+            info["count"],
+            ctx,
+        )
+        return
+
+    if data.startswith("tircancel:"):
+        tir_id = data.split(":", 1)[1]
+        if tir_id.startswith("mandala"):
+            await q.edit_message_text(
+                "🪐 <b>Mandala Astrológica</b>\n\nEscolha se deseja 12 ou 13 cartas.",
+                reply_markup=tiragem_mandala_kb(),
+                parse_mode="HTML",
+            )
         else:
-            b = render_image(path, card["rev"])
-            await ctx.bot.send_photo(
-                chat_id=chat_id,
-                photo=Input
+            await q.edit_message_text(
+                "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.",
+                reply_markup=tiragens_menu(),
+                parse_mode="HTML",
+            )
+        return
+
+    if data.startswith("g:"):
+        g = data.split(":", 1)[1]
+        s["group"] = g
+        s["page"] = 0
+        s["pending"] = None
+        await save_session(uid, s)
+        await q.edit_message_text("Escolha:", reply_markup=menu_cartas(g, 0))
+        return
+
+    if data.startswith("nav:"):
+        try:
+            _, g, p = data.split(":")
+            p = max(0, int(p))
+        except Exception:
+            await q.answer("Página inválida.", show_alert=True)
+            return
+
+        s["group"] = g
+        s["page"] = p
+        await save_session(uid, s)
+        await q.edit_message_reply_markup(reply_markup=menu_cartas(g, p))
+        return
+
+    if data == "back":
+        s["pending"] = None
+        await save_session(uid, s)
+        await q.edit_message_text("Escolha:", reply_markup=menu_grupos())
+        return
+
+    if data.startswith("c:"):
+        card = data.split(":", 1)[1]
+        s["pending"] = card
+        await save_session(uid, s)
+        await q.edit_message_text(
+            f"🃏 <b>{html.escape(card)}</b>\n\nEscolha a posição:",
+            reply_markup=pos_kb(),
+            parse_mode="HTML",
+        )
+        return
+
+    if data.startswith("p:"):
+        if not s.get("pending"):
+            await q.answer("Escolha uma carta primeiro", show_alert=True)
+            return
+
+        if len(s["cards"]) >= MAX_CARDS:
+            await q.answer("Limite de cartas atingido", show_alert=True)
+            return
+
+        rev = data == "p:r"
+        card = s["pending"]
+
+        s["cards"].append({"name": card, "rev": rev})
+        s["pending"] = None
+        s["updated_at"] = time.time()
+        await save_session(uid, s)
+
+        txt = selected_cards_text(s["cards"], MAX_CARDS)
+        kb = [
+            [InlineKeyboardButton("➕ Continuar", callback_data="cont")],
+            [InlineKeyboardButton("✅ Finalizar", callback_data="fim")],
+        ]
+        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data == "cont":
+        s["pending"] = None
+        await save_session(uid, s)
+        await q.edit_message_text("Escolha:", reply_markup=menu_grupos())
+        return
+
+    if data == "fim":
+        cards = s["cards"]
+        if not cards:
+            await q.answer("Selecione ao menos uma carta.", show_alert=True)
+            return
+
+        for c in cards:
+            img = find_image(c["name"])
+            if img:
+                b = render_image(img, c["rev"])
+                await ctx.bot.send_photo(chat_id=q.message.chat.id, photo=InputFile(b))
+            else:
+                await ctx.bot.send_message(
+                    chat_id=q.message.chat.id,
+                    text=f"🃏 <b>{html.escape(c['name'])}</b> ({'invertida' if c['rev'] else 'normal'})",
+                    parse_mode="HTML",
+                )
+
+        try:
+            res = await asyncio.to_thread(ai, cards, None)
+        except Exception:
+            logger.exception("Erro ao gerar interpretação do Gemini")
+            res = "⚠️ Erro ao gerar interpretação no momento."
+
+        partes = split_text(res)
+        if not partes:
+            partes = ["Sem resposta de interpretação no momento."]
+
+        for p in partes:
+            await ctx.bot.send_message(
+                chat_id=q.message.chat.id,
+                text=prepare_telegram_html(p.strip()),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        await ctx.bot.send_message(
+            chat_id=q.message.chat.id,
+            text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova leitura.",
+            parse_mode="HTML",
+        )
+
+        await delete_session(uid)
+        return
+# ---------------- MAIN ----------------
+
+async def post_init(app: Application):
+    app.bot_data["cleanup_task"] = asyncio.create_task(cleanup_sessions_task())
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ler", ler))
+    app.add_handler(CommandHandler("tirar", tirar))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("buscar", buscar))
+    app.add_handler(CallbackQueryHandler(cb))
+
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
