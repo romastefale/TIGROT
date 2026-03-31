@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import redis.asyncio as redis
 from google import genai
 from PIL import Image, ImageOps
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 logging.basicConfig(
@@ -219,30 +219,121 @@ def split_text(text: str, limit: int = 3800) -> List[str]:
 
 
 
+_ALLOWED_HTML_TAGS = ("b", "/b", "i", "/i", "u", "/u", "s", "/s", "code", "/code", "pre", "/pre", "tg-spoiler", "/tg-spoiler")
+
+
 def markdown_to_html(text: str) -> str:
+    text = text or ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Normalize common markdown emitted by the model.
+    text = re.sub(r"(?m)^\s*[\*-]\s+", "• ", text)
     text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
-    text = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<i>\1</i>", text)
-    return text
+    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"<i>\1</i>", text)
+
+    # Remove stray Telegram/HTML tags that the model may invent.
+    text = re.sub(r"</?tg-[^>]+>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?(?!b\b|i\b|u\b|s\b|code\b|pre\b|tg-spoiler\b)[a-z][^>]*>", "", text, flags=re.IGNORECASE)
+
+    # Encourage readable paragraphs.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
 
 
 def prepare_telegram_html(text: str) -> str:
     converted = markdown_to_html(text)
     escaped = html.escape(converted)
-    for tag in ("b", "/b", "i", "/i", "u", "/u"):
+    for tag in _ALLOWED_HTML_TAGS:
         escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
     return escaped
 
 
+async def send_html_message(
+    bot,
+    chat_id: int,
+    text: str,
+    *,
+    disable_web_page_preview: bool = True,
+) -> None:
+    prepared = prepare_telegram_html(text)
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=prepared,
+            parse_mode="HTML",
+            disable_web_page_preview=disable_web_page_preview,
+        )
+    except Exception:
+        logger.exception("Falha ao enviar mensagem HTML; usando fallback em texto puro.")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=re.sub(r"<[^>]+>", "", text),
+            disable_web_page_preview=disable_web_page_preview,
+        )
+
+
 async def send_split_message(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     for part in split_text(text):
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=prepare_telegram_html(part),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        await send_html_message(context.bot, chat_id, part)
+
+
+async def send_cards_visuals(
+    chat_id: int,
+    cards: List[Dict[str, Any]],
+    ctx: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Send tarot cards as a grouped album when possible."""
+    cards_with_images: List[tuple[Dict[str, Any], Path]] = []
+    cards_without_images: List[Dict[str, Any]] = []
+
+    for card in cards:
+        img = find_image(card["name"])
+        if img:
+            cards_with_images.append((card, img))
+        else:
+            cards_without_images.append(card)
+
+    if 2 <= len(cards_with_images) <= 10 and len(cards) <= 10:
+        media = []
+        for card, img in cards_with_images:
+            bio = render_image(img, card["rev"])
+            media.append(
+                InputMediaPhoto(
+                    media=InputFile(bio),
+                    caption=f"🃏 <b>{html.escape(card['name'])}</b> ({'invertida' if card['rev'] else 'normal'})",
+                    parse_mode="HTML",
+                )
+            )
+        await ctx.bot.send_media_group(chat_id=chat_id, media=media)
+
+        for card in cards_without_images:
+            await send_html_message(
+                ctx.bot,
+                chat_id,
+                f"🃏 <b>{html.escape(card['name'])}</b> ({'invertida' if card['rev'] else 'normal'})",
+            )
+        return
+
+    for card in cards:
+        img = find_image(card["name"])
+        if img:
+            bio = render_image(img, card["rev"])
+            await ctx.bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(bio),
+                caption=f"🃏 {html.escape(card['name'])} ({'invertida' if card['rev'] else 'normal'})",
+                parse_mode="HTML",
+            )
+        else:
+            await send_html_message(
+                ctx.bot,
+                chat_id,
+                f"🃏 <b>{html.escape(card['name'])}</b> ({'invertida' if card['rev'] else 'normal'})",
+            )
+
 
 # ---------------- SESSÃO ----------------# ---------------- SESSÃO ----------------
 
@@ -362,19 +453,34 @@ def build_prompt(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None
 Você é um intérprete didático de tarot.
 
 {tiragem_line}{('Regra da tiragem: ' + tiragem_rules + '\n') if tiragem_rules else ''}Responda em PORTUGUÊS DO BRASIL e use APENAS HTML do Telegram para formatação.
-Não use asteriscos literais para negrito ou itálico.
+Não use asteriscos literais, marcadores soltos do tipo "*", nem tags inventadas como <tg-b>.
+Não use markdown.
+Use mais quebras de linha do que o mínimo usual para facilitar a leitura.
+Separe cada carta com bloco próprio, deixando uma linha em branco entre:
+- título da carta;
+- significado;
+- ponto positivo;
+- ponto negativo;
+- combinação;
+- visão global.
+
 Use emojis relacionados ao conteúdo.
 Use este formato:
 
 <b>🃏 Carta 1 — NOME</b>
+
 <i>Significado:</i> ...
+
 <i>Ponto positivo:</i> ...
+
 <i>Ponto negativo:</i> ...
 
 <b>🔗 Combinações</b>
+
 ...
 
 <b>🌙 Visão global</b>
+
 ...
 
 Regras:
@@ -385,6 +491,8 @@ Regras:
 - Se a carta estiver invertida, interprete isso de forma explícita.
 - Traga a leitura por tiragem quando houver nome informado.
 - Termine com uma sensação de fechamento coerente com a tiragem.
+- Não use listas com asteriscos.
+- Se precisar listar pontos, use parágrafos curtos ou marcadores com "•".
 
 Cartas:
 {txt}
@@ -558,22 +666,7 @@ async def _run_tiragem(chat_id: int, uid: int, tiragem_id: str, tiragem_name: st
         parse_mode="HTML",
     )
 
-    for c in result:
-        img = find_image(c["name"])
-        if img:
-            b = render_image(img, c["rev"])
-            await ctx.bot.send_photo(
-                chat_id=chat_id,
-                photo=InputFile(b),
-                caption=f"🃏 {html.escape(c['name'])} ({'invertida' if c['rev'] else 'normal'})",
-                parse_mode="HTML",
-            )
-        else:
-            await ctx.bot.send_message(
-                chat_id=chat_id,
-                text=f"🃏 <b>{html.escape(c['name'])}</b> ({'invertida' if c['rev'] else 'normal'})",
-                parse_mode="HTML",
-            )
+    await send_cards_visuals(chat_id, result, ctx)
 
     try:
         res = await asyncio.to_thread(ai, result, tiragem_name)
@@ -586,12 +679,7 @@ async def _run_tiragem(chat_id: int, uid: int, tiragem_id: str, tiragem_name: st
         partes = ["Sem resposta de interpretação no momento."]
 
     for p in partes:
-        await ctx.bot.send_message(
-            chat_id=chat_id,
-            text=prepare_telegram_html(p.strip()),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        await send_html_message(ctx.bot, chat_id, p.strip())
 
     await ctx.bot.send_message(
         chat_id=chat_id,
@@ -613,7 +701,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "tirback":
         await q.edit_message_text(
-            "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.",
+            "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.\n\nAs cartas serão exibidas com mais espaço visual e, quando possível, em conjunto.",
             reply_markup=tiragens_menu(),
             parse_mode="HTML",
         )
@@ -667,7 +755,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await q.edit_message_text(
-                "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.",
+                "🎲 <b>Escolha a tiragem</b>\n\nSelecione um formato abaixo.\n\nAs cartas serão exibidas com mais espaço visual e, quando possível, em conjunto.",
                 reply_markup=tiragens_menu(),
                 parse_mode="HTML",
             )
@@ -750,17 +838,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.answer("Selecione ao menos uma carta.", show_alert=True)
             return
 
-        for c in cards:
-            img = find_image(c["name"])
-            if img:
-                b = render_image(img, c["rev"])
-                await ctx.bot.send_photo(chat_id=q.message.chat.id, photo=InputFile(b))
-            else:
-                await ctx.bot.send_message(
-                    chat_id=q.message.chat.id,
-                    text=f"🃏 <b>{html.escape(c['name'])}</b> ({'invertida' if c['rev'] else 'normal'})",
-                    parse_mode="HTML",
-                )
+        await send_cards_visuals(q.message.chat.id, cards, ctx)
 
         try:
             res = await asyncio.to_thread(ai, cards, None)
@@ -773,17 +851,12 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             partes = ["Sem resposta de interpretação no momento."]
 
         for p in partes:
-            await ctx.bot.send_message(
-                chat_id=q.message.chat.id,
-                text=prepare_telegram_html(p.strip()),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+            await send_html_message(ctx.bot, q.message.chat.id, p.strip())
 
-        await ctx.bot.send_message(
-            chat_id=q.message.chat.id,
-            text="✨ Tiragem finalizada.\nUse /ler ou /tirar para nova leitura.",
-            parse_mode="HTML",
+        await send_html_message(
+            ctx.bot,
+            q.message.chat.id,
+            "✨ Tiragem finalizada.\n\nUse /ler ou /tirar para nova leitura.",
         )
 
         await delete_session(uid)
