@@ -16,7 +16,10 @@ from PIL import Image, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 logger = logging.getLogger("tarot_bot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -45,18 +48,17 @@ TAROT_MAJOR = [
     "O Hierofante", "Os Enamorados", "O Carro", "A Força", "O Eremita",
     "A Roda da Fortuna", "A Justiça", "O Enforcado", "A Morte",
     "A Temperança", "O Diabo", "A Torre", "A Estrela", "A Lua",
-    "O Sol", "O Julgamento", "O Mundo"
+    "O Sol", "O Julgamento", "O Mundo",
 ]
 
 RANKS = [
     "Ás", "Dois", "Três", "Quatro", "Cinco", "Seis", "Sete", "Oito",
-    "Nove", "Dez", "Valete", "Cavaleiro", "Rainha", "Rei"
+    "Nove", "Dez", "Valete", "Cavaleiro", "Rainha", "Rei",
 ]
 SUITS = ["Copas", "Paus", "Espadas", "Ouros"]
 MINOR = {s: [f"{r} de {s}" for r in RANKS] for s in SUITS}
 ALL_CARDS = TAROT_MAJOR + [c for s in SUITS for c in MINOR[s]]
 
-# Arquivos locais do RWS
 RWS_MAJOR_IMAGE_STEMS = {
     "O Louco": "TarotRWS-00-louco",
     "O Mago": "TarotRWS-01-mago",
@@ -88,7 +90,7 @@ RWS_MINOR_IMAGE_STEMS = {
     for idx, rank in enumerate(RANKS, 1)
 }
 
-# ---------------- UTILS ----------------
+# ---------------- UTILITÁRIOS ----------------
 
 def slugify(v: str) -> str:
     v = unicodedata.normalize("NFKD", v or "")
@@ -109,6 +111,7 @@ def build_index() -> Dict[str, Path]:
     logger.info("Índice de imagens carregado: %d arquivos em %s", len(idx), IMAGE_ROOT)
     return idx
 
+
 IMAGE_INDEX = build_index()
 
 
@@ -117,7 +120,6 @@ def find_image(card_name: str) -> Optional[Path]:
 
     if card_name in RWS_MAJOR_IMAGE_STEMS:
         candidate_stems.append(RWS_MAJOR_IMAGE_STEMS[card_name])
-
     if card_name in RWS_MINOR_IMAGE_STEMS:
         candidate_stems.append(RWS_MINOR_IMAGE_STEMS[card_name])
 
@@ -167,7 +169,7 @@ async def send_split_message(chat_id: int, text: str, context: ContextTypes.DEFA
     for part in split_text(text):
         await context.bot.send_message(chat_id=chat_id, text=part)
 
-# ---------------- SESSION ----------------
+# ---------------- SESSÃO ----------------
 
 def _default_session() -> Dict[str, Any]:
     return {
@@ -198,15 +200,15 @@ async def load_session(uid: int) -> Dict[str, Any]:
         return session
 
     if redis_client:
-        raw = await redis_client.get(f"session:{uid}")
-        if raw:
-            try:
+        try:
+            raw = await redis_client.get(f"session:{uid}")
+            if raw:
                 session = _sanitize_session(json.loads(raw))
                 session["updated_at"] = time.time()
                 SESSIONS[uid] = session
                 return session
-            except Exception:
-                logger.exception("Falha ao carregar sessão do Redis para uid=%s", uid)
+        except Exception:
+            logger.exception("Falha ao carregar sessão do Redis para uid=%s", uid)
 
     session = _default_session()
     SESSIONS[uid] = session
@@ -547,6 +549,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await delete_session(uid)
         return
+
 
 # ---------------- MAIN ----------------
 
