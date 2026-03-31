@@ -486,21 +486,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔮 <b>Bem-vindo ao Tarot Interativo</b>\n\n"
         "Aqui você pode explorar o <b>Tarot Rider-Waite</b> de forma clara, intuitiva e completa.\n\n"
-        "🃏 <b>Escolha suas cartas manualmente</b>\n"
-        "🎲 <b>Faça tiragens guiadas e automáticas</b>\n"
-        "🧠 <b>Receba interpretações didáticas</b>\n"
-        "   • Significado\n"
-        "   • Pontos positivos\n"
-        "   • Desafios\n"
-        "   • Visão global\n\n"
-        "<b>Comandos:</b>\n"
-        "/ler - 🔮 Escolher cartas manualmente\n"
-        "/tirar - 🎲 Sortear cartas automaticamente\n\n"
-        "👇 <i>Ou use os botões abaixo para iniciar sua interpretação</i>",
+        "<b>Comandos disponíveis:</b>\n"
+        "/ler - 🃏 <b>Escolher cartas manualmente:</b> Selecione você mesmo as cartas e suas posições (normal ou invertida) para uma leitura personalizada.\n"
+        "/tirar - 🎲 <b>Fazer tiragem automática guiada:</b> Escolha um método de tiragem e o bot sorteará e interpretará as cartas para você.\n"
+        "/buscar - 🔎 <b>Buscar carta pelo nome:</b> Encontre rapidamente uma carta específica no baralho (ex: /buscar torre).\n"
+        "/reset - ♻️ <b>Limpar sessão atual:</b> Apaga suas seleções atuais e reinicia a leitura do zero.\n\n"
+        "👇 <i>Ou use os botões abaixo para iniciar sua interpretação manualmente</i>",
         reply_markup=menu_grupos(),
         parse_mode="HTML"
     )
-
 async def ler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await start(update, ctx)
 
