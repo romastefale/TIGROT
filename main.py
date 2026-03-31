@@ -496,7 +496,13 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 async def ler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    return await start(update, ctx)
+    await update.message.reply_text(
+        "🃏 <b>Escolher cartas manualmente</b>\n\n"
+        "Neste modo, você mesmo escolhe as cartas e suas posições (normal ou invertida) para criar uma leitura personalizada.\n\n"
+        "👇 <i>Use os botões abaixo para iniciar sua seleção:</i>",
+        reply_markup=menu_grupos(),
+        parse_mode="HTML"
+    )
 
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
