@@ -1,178 +1,641 @@
+import asyncio
+import html
+import json
+import logging
+import math
 import os
 import re
-import sys
-import time
-import asyncio
-import logging
-import requests
-import telegram.error
-from threading import Lock
-from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional
 
-from telegram import (
-    Update,
-    InlineQueryResultPhoto,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
-)
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    InlineQueryHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    filters
-)
+from google import genai
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler
 
-# ==========================================
-# LAYOUT 1: CONFIGURAÇÃO DE LOGS E AMBIENTE
-# ==========================================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    stream=sys.stdout
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger("tarot_bot")
 
-# Variáveis do Railway
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
-ADMIN_ID_RAW = os.getenv("ADMIN_ID")
-try:
-    ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW else None
-except ValueError:
-    logger.warning("Valor de ADMIN_ID inválido. O bot rodará sem restrições de administrador.")
-    ADMIN_ID = None
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "tarot-webhook").strip("/")
+WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
 
-try:
-    PORT = int(os.getenv("PORT", 8080))
-except ValueError:
-    logger.warning("Valor de PORT inválido, usando 8080 por padrão.")
-    PORT = 8080
+PORT = int(os.getenv("PORT", "8080"))
+MAX_CARDS = 12
+CARDS_PER_PAGE = 10
 
-if not TOKEN:
-    raise ValueError("ERRO CRÍTICO: Configure TELEGRAM_TOKEN nas variáveis do Railway!")
+SESSIONS: Dict[int, Dict[str, Any]] = {}
 
-# ==========================================
-# LAYOUT 2: VARIÁVEIS GLOBAIS E PADRÕES
-# ==========================================
-session = requests.Session()
-cache = {}
-cache_lock = Lock()
-CACHE_MAX_SIZE = 500
-_executor = ThreadPoolExecutor(max_workers=4)
+TAROT_MAJOR = [
+    "O Louco",
+    "O Mago",
+    "A Sacerdotisa",
+    "A Imperatriz",
+    "O Imperador",
+    "O Hierofante",
+    "Os Enamorados",
+    "O Carro",
+    "A Força",
+    "O Eremita",
+    "A Roda da Fortuna",
+    "A Justiça",
+    "O Enforcado",
+    "A Morte",
+    "A Temperança",
+    "O Diabo",
+    "A Torre",
+    "A Estrela",
+    "A Lua",
+    "O Sol",
+    "O Julgamento",
+    "O Mundo"
+]
+TAROT_MINOR_RANKS = [
+    "Ás",
+    "Dois",
+    "Três",
+    "Quatro",
+    "Cinco",
+    "Seis",
+    "Sete",
+    "Oito",
+    "Nove",
+    "Dez",
+    "Valete",
+    "Cavaleiro",
+    "Rainha",
+    "Rei"
+]
+TAROT_SUITS = [
+    "Copas",
+    "Paus",
+    "Espadas",
+    "Ouros"
+]
+TAROT_CARDS = TAROT_MAJOR + [f"{rank} de {suit}" for suit in TAROT_SUITS for rank in TAROT_MINOR_RANKS]
 
-FORBIDDEN_PATTERN = re.compile(
-    r'['
-    r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF'  # Árabe
-    r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'               # Cirílico
-    r'\u4E00-\u9FFF\u3400-\u4DBF'                                         # Chinês
-    r'\u0900-\u097F'                                                      # Hindi
-    r'\u0980-\u09FF'                                                      # Bengali
-    r']'
-)
+CIGANO_CARDS = [
+    "O Cavaleiro",
+    "O Trevo",
+    "O Navio",
+    "A Casa",
+    "A Árvore",
+    "As Nuvens",
+    "A Cobra",
+    "O Caixão",
+    "O Buquê",
+    "A Foice",
+    "O Chicote",
+    "Os Pássaros",
+    "A Criança",
+    "A Raposa",
+    "O Urso",
+    "As Estrelas",
+    "A Cegonha",
+    "O Cão",
+    "A Torre",
+    "O Jardim",
+    "A Montanha",
+    "Os Caminhos",
+    "Os Ratos",
+    "O Coração",
+    "O Anel",
+    "O Livro",
+    "A Carta",
+    "O Homem",
+    "A Mulher",
+    "Os Lírios",
+    "O Sol",
+    "A Lua",
+    "A Chave",
+    "Os Peixes",
+    "A Âncora",
+    "A Cruz"
+]
 
-# ==========================================
-# LAYOUT 3: NÚCLEO DE HIGIENIZAÇÃO E SEGURANÇA
-# ==========================================
-async def sanitize_text(text):
+DECK_LABELS = {
+    "tarot": "Tarot",
+    "cigano": "Baralho Cigano",
+}
+
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cards": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "meaning": {"type": "string"},
+                    "positive": {"type": "string"},
+                    "negative": {"type": "string"}
+                },
+                "required": ["name", "meaning", "positive", "negative"]
+            }
+        },
+        "combinations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "interpretation": {"type": "string"}
+                },
+                "required": ["title", "interpretation"]
+            }
+        },
+        "global_view": {"type": "string"}
+    },
+    "required": ["cards", "combinations", "global_view"]
+}
+
+SYSTEM_INSTRUCTION = """
+Você é um intérprete didático de tarot e baralho cigano.
+Você responde em português do Brasil.
+
+Regras:
+- Interprete cada carta separadamente.
+- Se a carta vier invertida, considere a posição invertida.
+- Se não vier indicação, considere posição comum.
+- Para cada carta, entregue significado, ponto positivo e ponto negativo.
+- Não omita os aspectos difíceis, tensos, sombrios ou desfavoráveis.
+- Não suavize o negativo para agradar.
+- Quando houver ambiguidade, mostre possibilidades, não certezas absolutas.
+- Depois combine as cartas em leituras possíveis.
+- Finalize com uma visão global da tiragem.
+- Seja sincero, claro, didático e completo.
+- Mantenha o texto útil para estudo, sem prometer verdade absoluta.
+""".strip()
+
+if not BOT_TOKEN:
+    raise RuntimeError("Defina a variável de ambiente BOT_TOKEN.")
+if not GEMINI_API_KEY:
+    raise RuntimeError("Defina GEMINI_API_KEY ou GOOGLE_API_KEY.")
+
+GENAI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
+
+
+def normalize_public_url(raw: str) -> str:
+    raw = (raw or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"https://{raw}"
+
+
+PUBLIC_URL = normalize_public_url(WEBHOOK_URL)
+
+
+def now_ts() -> float:
+    return asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0.0
+
+
+def new_session() -> Dict[str, Any]:
+    return {
+        "deck": None,
+        "page": 0,
+        "cards": [],
+        "pending_index": None,
+        "updated_at": 0.0,
+    }
+
+
+def touch_session(user_id: int) -> Dict[str, Any]:
+    session = SESSIONS.get(user_id)
+    if session is None:
+        session = new_session()
+        SESSIONS[user_id] = session
+    session["updated_at"] = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0.0
+    return session
+
+
+def clear_session(user_id: int) -> None:
+    SESSIONS.pop(user_id, None)
+
+
+def get_cards(deck: str) -> List[str]:
+    return TAROT_CARDS if deck == "tarot" else CIGANO_CARDS
+
+
+def deck_title(deck: str) -> str:
+    return DECK_LABELS.get(deck, deck)
+
+
+def cards_pages(deck: str) -> int:
+    return max(1, math.ceil(len(get_cards(deck)) / CARDS_PER_PAGE))
+
+
+def format_selected_cards(cards: List[Dict[str, Any]]) -> str:
+    if not cards:
+        return "Nenhuma carta selecionada ainda."
+
+    lines = ["Tiragem atual:"]
+    for i, card in enumerate(cards, 1):
+        pos = "invertida" if card["reversed"] else "normal"
+        lines.append(f"{i}. {card['name']} ({pos})")
+    lines.append("")
+    lines.append(f"Total: {len(cards)}/{MAX_CARDS}")
+    return "\n".join(lines)
+
+
+def split_telegram_text(text: str, limit: int = 3800) -> List[str]:
+    text = (text or "").strip()
     if not text:
-        return text
+        return []
+    parts: List[str] = []
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        if cut < 100:
+            cut = text.rfind(". ", 0, limit)
+        if cut < 100:
+            cut = limit
+        parts.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        parts.append(text)
+    return parts
 
-    text = str(text)
 
-    if not FORBIDDEN_PATTERN.search(text):
-        return text
+async def send_split_message(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    for part in split_telegram_text(text):
+        await context.bot.send_message(chat_id=chat_id, text=part)
 
-    try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "auto", "tl": "en", "dt": "t", "q": text}
-        response = await asyncio.to_thread(session.get, url, params=params, timeout=3)
-        
-        if response.status_code == 200:
-            data = response.json()
-            translated_text = "".join([sentence[0] for sentence in data[0]])
-            if not FORBIDDEN_PATTERN.search(translated_text):
-                return translated_text
-    except Exception as e:
-        logger.warning(f"Falha na tradução automática: {e}")
 
-    sanitized = FORBIDDEN_PATTERN.sub("", text)
-    sanitized = re.sub(r'\s+', ' ', sanitized).strip()
-    return sanitized if sanitized else "Unknown"
+def selection_text(session: Dict[str, Any]) -> str:
+    deck = session["deck"]
+    page = session["page"]
+    total_pages = cards_pages(deck)
+    selected = session["cards"]
 
-def escape_markdown(text):
-    return re.sub(r"([_*`\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
+    lines = [
+        f"Baralho: {deck_title(deck)}",
+        f"Página: {page + 1}/{total_pages}",
+        f"Selecionadas: {len(selected)}/{MAX_CARDS}",
+        "",
+        "Escolha uma carta pelos botões abaixo.",
+    ]
 
-def evict_cache():
-    with cache_lock:
-        if len(cache) >= CACHE_MAX_SIZE:
-            oldest_keys = list(cache.keys())[:100]
-            for k in oldest_keys:
-                del cache[k]
+    if selected:
+        lines.append("")
+        lines.append(format_selected_cards(selected))
 
-def is_admin(user_id: int | None) -> bool:
-    return ADMIN_ID is not None and user_id == ADMIN_ID
+    return "\n".join(lines)
 
-# ==========================================
-# LAYOUT 4: COMANDOS E INTERAÇÕES DO BOT
-# ==========================================
-async def comando_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde ao comando /start com base no nível de acesso."""
-    user = update.effective_user
-    
-    if is_admin(user.id):
-        saudacao = f"Olá, Admin {user.first_name}! Sistema operacional no Railway."
-    else:
-        saudacao = f"Olá, {user.first_name}! Envie um texto e eu farei a higienização."
-        
-    await update.message.reply_text(saudacao)
 
-async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Intercepta mensagens, higieniza e devolve o resultado seguro."""
-    texto_original = update.message.text
-    
-    # Feedback visual enquanto a tradução ocorre em background
-    msg_temporaria = await update.message.reply_text("⏳ Processando texto...")
-    
-    # Passa pelo seu filtro
-    texto_limpo = await sanitize_text(texto_original)
-    texto_seguro = escape_markdown(texto_limpo)
-    
-    # Atualiza a mensagem com o resultado final
-    await msg_temporaria.edit_text(
-        f"*Texto Higienizado:*\n{texto_seguro}", 
-        parse_mode=ParseMode.MARKDOWN_V2
+def page_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
+    deck = session["deck"]
+    page = session["page"]
+    cards = get_cards(deck)
+    start = page * CARDS_PER_PAGE
+    end = min(len(cards), start + CARDS_PER_PAGE)
+
+    rows: List[List[InlineKeyboardButton]] = []
+
+    for idx in range(start, end):
+        rows.append([
+            InlineKeyboardButton(cards[idx], callback_data=f"pick:{deck}:{idx}")
+        ])
+
+    nav_row: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"nav:{deck}:{page - 1}"))
+    if page < cards_pages(deck) - 1:
+        nav_row.append(InlineKeyboardButton("Próxima ➡️", callback_data=f"nav:{deck}:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+
+    footer: List[InlineKeyboardButton] = []
+    if session["cards"] and len(session["cards"]) < MAX_CARDS:
+        footer.append(InlineKeyboardButton("➕ Adicionar outra", callback_data="more"))
+    if session["cards"]:
+        footer.append(InlineKeyboardButton("✅ Finalizar", callback_data="finish"))
+    if footer:
+        rows.append(footer)
+
+    return InlineKeyboardMarkup(rows)
+
+
+def position_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬆️ Normal", callback_data="pos:normal")],
+        [InlineKeyboardButton("⬇️ Invertida", callback_data="pos:reversed")],
+        [InlineKeyboardButton("↩️ Voltar", callback_data="back")],
+    ])
+
+
+def deck_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🃏 Tarot", callback_data="deck:tarot")],
+        [InlineKeyboardButton("🔮 Baralho Cigano", callback_data="deck:cigano")],
+    ])
+
+
+def build_prompt(cards: List[Dict[str, Any]]) -> str:
+    items = []
+    for i, card in enumerate(cards, 1):
+        pos = "invertida" if card["reversed"] else "normal"
+        items.append(f"{i}. {card['name']} ({pos})")
+    cards_block = "\n".join(items)
+
+    return f"""
+Você recebeu uma tiragem para interpretar.
+
+Regras da resposta:
+- Entregue os campos de forma clara, completa e didática.
+- Para cada carta, explique significado, ponto positivo e ponto negativo.
+- Não omita partes difíceis, tensas ou desfavoráveis.
+- Seja sincero e não afirme certezas absolutas.
+- Se houver nuance, mostre possibilidades.
+- Depois inclua combinações relevantes entre as cartas.
+- Finalize com visão global da tiragem.
+- Escreva em português do Brasil.
+
+Cartas:
+{cards_block}
+""".strip()
+
+
+def gemini_generate(cards: List[Dict[str, Any]]) -> Dict[str, Any]:
+    prompt = build_prompt(cards)
+
+    response = GENAI_CLIENT.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config={
+            "system_instruction": SYSTEM_INSTRUCTION,
+            "temperature": 0.7,
+            "response_mime_type": "application/json",
+            "response_json_schema": RESPONSE_SCHEMA,
+        },
     )
 
-# ==========================================
-# LAYOUT 5: MOTOR DE EXECUÇÃO (MAIN)
-# ==========================================
-def main():
-    logger.info("Iniciando o sistema...")
-    app = Application.builder().token(TOKEN).build()
+    raw = (response.text or "").strip()
+    raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"^```\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
 
-    # Registrando os comandos do Layout 4
-    app.add_handler(CommandHandler("start", comando_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, processar_mensagem))
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {
+            "cards": [],
+            "combinations": [],
+            "global_view": raw or "A IA não retornou JSON válido.",
+        }
 
-    # Decisão de Inicialização: Railway (Webhook) vs Local (Polling)
-    if WEBHOOK_URL:
-        logger.info(f"Modo Webhook ativado (Railway). Escutando na porta {PORT}...")
+    if not isinstance(data, dict):
+        data = {"cards": [], "combinations": [], "global_view": str(data)}
+
+    data.setdefault("cards", [])
+    data.setdefault("combinations", [])
+    data.setdefault("global_view", "")
+    return data
+
+
+async def render_deck_prompt(query, user_id: int) -> None:
+    clear_session(user_id)
+    SESSIONS[user_id] = new_session()
+    session = SESSIONS[user_id]
+    session["updated_at"] = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0.0
+    await query.edit_message_text(
+        "Escolha o baralho:",
+        reply_markup=deck_keyboard(),
+    )
+
+
+async def render_selection_page(query, user_id: int) -> None:
+    session = touch_session(user_id)
+    text = selection_text(session)
+    try:
+        await query.edit_message_text(
+            text,
+            reply_markup=page_keyboard(session),
+        )
+    except BadRequest as exc:
+        if "Message is not modified" not in str(exc):
+            raise
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    clear_session(user_id)
+    SESSIONS[user_id] = new_session()
+    await update.message.reply_text(
+        "Escolha o baralho para começar:",
+        reply_markup=deck_keyboard(),
+    )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    clear_session(user_id)
+    await update.message.reply_text("Sessão limpa. Use /start para recomeçar.")
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data or ""
+    session = touch_session(user_id)
+
+    if data.startswith("deck:"):
+        deck = data.split(":", 1)[1]
+        if deck not in ("tarot", "cigano"):
+            await query.edit_message_text("Baralho inválido. Use /start para reiniciar.")
+            return
+        clear_session(user_id)
+        session = {
+            "deck": deck,
+            "page": 0,
+            "cards": [],
+            "pending_index": None,
+            "updated_at": asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0.0,
+        }
+        SESSIONS[user_id] = session
+        await query.edit_message_text(
+            f"Baralho escolhido: {deck_title(deck)}\n\n{selection_text(session)}",
+            reply_markup=page_keyboard(session),
+        )
+        return
+
+    if session.get("deck") is None:
+        await query.edit_message_text("Use /start e escolha um baralho primeiro.")
+        return
+
+    if data.startswith("nav:"):
+        try:
+            _, deck, page_s = data.split(":")
+            session["page"] = max(0, min(int(page_s), cards_pages(deck) - 1))
+        except Exception:
+            await query.answer("Página inválida.", show_alert=True)
+            return
+        await render_selection_page(query, user_id)
+        return
+
+    if data.startswith("pick:"):
+        try:
+            _, deck, idx_s = data.split(":")
+            idx = int(idx_s)
+        except Exception:
+            await query.answer("Carta inválida.", show_alert=True)
+            return
+
+        if deck != session["deck"]:
+            await query.answer("O baralho atual não bate com a seleção.", show_alert=True)
+            return
+
+        cards = get_cards(deck)
+        if idx < 0 or idx >= len(cards):
+            await query.answer("Carta fora da faixa.", show_alert=True)
+            return
+
+        if len(session["cards"]) >= MAX_CARDS:
+            await query.answer("Limite máximo de 12 cartas atingido.", show_alert=True)
+            return
+
+        session["pending_index"] = idx
+        card_name = cards[idx]
+        await query.edit_message_text(
+            f"Você escolheu: {card_name}\n\nA carta saiu em qual posição?",
+            reply_markup=position_keyboard(),
+        )
+        return
+
+    if data == "back":
+        session["pending_index"] = None
+        await render_selection_page(query, user_id)
+        return
+
+    if data.startswith("pos:"):
+        pending_index = session.get("pending_index")
+        if pending_index is None:
+            await query.answer("Escolha uma carta primeiro.", show_alert=True)
+            return
+
+        orientation = data.split(":", 1)[1]
+        if orientation not in ("normal", "reversed"):
+            await query.answer("Posição inválida.", show_alert=True)
+            return
+
+        deck = session["deck"]
+        card_name = get_cards(deck)[pending_index]
+        session["cards"].append({
+            "deck": deck,
+            "name": card_name,
+            "reversed": orientation == "reversed",
+        })
+        session["pending_index"] = None
+
+        await query.edit_message_text(
+            format_selected_cards(session["cards"]),
+            reply_markup=page_keyboard(session),
+        )
+        return
+
+    if data == "more":
+        await render_selection_page(query, user_id)
+        return
+
+    if data == "finish":
+        cards = session.get("cards", [])
+        if not cards:
+            await query.answer("Selecione ao menos uma carta.", show_alert=True)
+            return
+
+        await query.edit_message_text("🔮 Gerando a interpretação...")
+        try:
+            result = await asyncio.to_thread(gemini_generate, cards)
+        except Exception as exc:
+            logger.exception("Falha ao chamar o Gemini")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Não consegui gerar a leitura agora. Erro: {exc}",
+            )
+            return
+
+        await send_split_message(query.message.chat_id, "📌 Interpretação por carta:", context)
+
+        cards_result = result.get("cards") or []
+        if not cards_result:
+            for card in cards:
+                msg = (
+                    f"• {card['name']} ({'invertida' if card['reversed'] else 'normal'})\n"
+                    "Significado: não retornado pela IA.\n"
+                    "Ponto positivo: não retornado pela IA.\n"
+                    "Ponto negativo: não retornado pela IA."
+                )
+                await send_split_message(query.message.chat_id, msg, context)
+        else:
+            for i, item in enumerate(cards_result, 1):
+                msg = (
+                    f"📍 Carta {i} — {item.get('name', 'Carta')}\n"
+                    f"Significado: {item.get('meaning', '')}\n"
+                    f"Ponto positivo: {item.get('positive', '')}\n"
+                    f"Ponto negativo: {item.get('negative', '')}"
+                )
+                await send_split_message(query.message.chat_id, msg, context)
+
+        combos = result.get("combinations") or []
+        if combos:
+            await send_split_message(query.message.chat_id, "🔗 Combinações e possibilidades:", context)
+            for combo in combos:
+                title = combo.get("title", "Combinação")
+                interpretation = combo.get("interpretation", "")
+                await send_split_message(query.message.chat_id, f"• {title}\n{interpretation}", context)
+
+        global_view = result.get("global_view", "").strip()
+        if global_view:
+            await send_split_message(query.message.chat_id, f"🌙 Visão global:\n{global_view}", context)
+
+        clear_session(user_id)
+        return
+
+    await query.answer("Ação não reconhecida.", show_alert=True)
+
+
+async def text_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Use /start para iniciar a tiragem com botões.")
+
+
+def build_application() -> Application:
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback))
+    return app
+
+
+def main() -> None:
+    app = build_application()
+    if PUBLIC_URL:
+        webhook_url = f"{PUBLIC_URL}/{WEBHOOK_PATH}"
+        logger.info("Iniciando em modo webhook: %s", webhook_url)
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            secret_token=WEBHOOK_SECRET,
-            webhook_url=WEBHOOK_URL
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            secret_token=WEBHOOK_SECRET_TOKEN or None,
+            drop_pending_updates=True,
+            bootstrap_retries=0,
         )
     else:
-        logger.info("Modo Polling ativado (Local).")
+        logger.warning("WEBHOOK_URL/RAILWAY_PUBLIC_DOMAIN não definido. Iniciando em polling local.")
         app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
