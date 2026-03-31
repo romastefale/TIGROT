@@ -423,7 +423,7 @@ async def _build_input_stickers() -> tuple[List[InputSticker], List[InputSticker
 
         paths_used.append(src)
         emoji = pack_sticker_emoji(card)
-        sticker = InputSticker(sticker=src, emoji_list=[emoji])
+        sticker = InputSticker(sticker=src, emoji_list=[emoji], format="static")
         if len(stickers) < 50:
             stickers.append(sticker)
         else:
