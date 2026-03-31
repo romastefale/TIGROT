@@ -5,6 +5,9 @@ import logging
 import os
 import random
 import re
+import shutil
+import tempfile
+import zipfile
 import time
 import unicodedata
 from io import BytesIO
@@ -14,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import redis.asyncio as redis
 from google import genai
 from PIL import Image, ImageOps
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputSticker, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 logging.basicConfig(
@@ -38,7 +41,11 @@ CARDS_PER_PAGE = 8
 SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 IMAGE_ROOT = Path(os.getenv("RWS_IMAGE_DIR", "assets/rws"))
+STICKER_ROOT = Path(os.getenv("TIGROT_STICKER_DIR", "assets/rws-png"))
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+TIGROT_PACK_NAME = os.getenv("TIGROT_PACK_NAME", "TIGROT").strip() or "TIGROT"
+TIGROT_PACK_DISPLAY_NAME = os.getenv("TIGROT_PACK_DISPLAY_NAME", "/TIGROT").strip() or "/TIGROT"
+TIGROT_PACK_URL = os.getenv("TIGROT_PACK_URL", "").strip()
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
@@ -112,6 +119,13 @@ TIRAGENS = {
     },
 }
 
+MAJOR_NUMBERS = {name: i for i, name in enumerate(TAROT_MAJOR)}
+MAJOR_ALIASES: Dict[str, List[str]] = {
+    "A Sacerdotisa": ["alta-sacerdotisa", "sacerdotisa-alta"],
+    "A Roda da Fortuna": ["roda", "roda-da-fortuna"],
+    "O Enforcado": ["pendurado", "enforcado-pendurado"],
+}
+
 RWS_MAJOR_IMAGE_STEMS = {
     "O Louco": "TarotRWS-00-louco",
     "O Mago": "TarotRWS-01-mago",
@@ -151,42 +165,101 @@ def slugify(v: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", v.lower()).strip("-")
 
 
-def build_index() -> Dict[str, Path]:
+def build_index(root: Path) -> Dict[str, Path]:
     idx: Dict[str, Path] = {}
-    if not IMAGE_ROOT.exists():
-        logger.warning("Pasta de imagens não encontrada: %s", IMAGE_ROOT)
+    if not root.exists():
+        logger.warning("Pasta de imagens não encontrada: %s", root)
         return idx
 
-    for f in IMAGE_ROOT.rglob("*"):
+    for f in root.rglob("*"):
         if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
             idx[slugify(f.stem)] = f
 
-    logger.info("Índice de imagens carregado: %d arquivos em %s", len(idx), IMAGE_ROOT)
+    logger.info("Índice de imagens carregado: %d arquivos em %s", len(idx), root)
     return idx
 
 
-IMAGE_INDEX = build_index()
+PHOTO_INDEX = build_index(IMAGE_ROOT)
+STICKER_INDEX = build_index(STICKER_ROOT)
+IMAGE_INDEX = PHOTO_INDEX
+
+
+def _strip_articles(name: str) -> str:
+    return re.sub(r"^(?:o|a|os|as)\s+", "", name.strip(), flags=re.I)
+
+
+def card_stem_candidates(card_name: str) -> List[str]:
+    name = card_name.strip()
+    candidates: List[str] = []
+
+    if name in MAJOR_NUMBERS:
+        num = MAJOR_NUMBERS[name]
+        clean = _strip_articles(name)
+        slug_clean = slugify(clean)
+        slug_full = slugify(name)
+        candidates.extend([
+            f"{num:02d}-{slug_clean}",
+            f"{num:02d}-{slug_full}",
+            f"TarotRWS-{num:02d}-{slug_clean}",
+            f"TarotRWS-{num:02d}-{slug_full}",
+        ])
+        for alias in MAJOR_ALIASES.get(name, []):
+            candidates.extend([
+                f"{num:02d}-{alias}",
+                f"TarotRWS-{num:02d}-{alias}",
+            ])
+    else:
+        if " de " in name:
+            rank, suit = name.split(" de ", 1)
+            rank = rank.strip()
+            suit = suit.strip()
+            rank_slug = slugify(rank)
+            suit_slug = slugify(suit)
+            if rank in RANKS and suit in SUITS:
+                idx = RANKS.index(rank) + 1
+                candidates.extend([
+                    f"{suit}-{idx:02d}",
+                    f"{suit}-{idx}",
+                    f"{suit}-{rank}",
+                    f"{suit}-{rank_slug}",
+                    f"{suit_slug}-{idx:02d}",
+                    f"{suit_slug}-{rank_slug}",
+                    f"TarotRWS-{suit}-{idx:02d}",
+                ])
+
+    candidates.extend([
+        name,
+        slugify(name),
+        f"TarotRWS-{slugify(name)}",
+    ])
+
+    ordered: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        key = slugify(candidate)
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(candidate)
+    return ordered
+
+
+def find_media(card_name: str, prefer_sticker: bool = True) -> Optional[Path]:
+    indexes = (STICKER_INDEX, PHOTO_INDEX) if prefer_sticker else (PHOTO_INDEX, STICKER_INDEX)
+    for stem in card_stem_candidates(card_name):
+        key = slugify(stem)
+        for idx in indexes:
+            path = idx.get(key)
+            if path:
+                return path
+    return None
+
+
+def find_sticker(card_name: str) -> Optional[Path]:
+    return find_media(card_name, prefer_sticker=True)
 
 
 def find_image(card_name: str) -> Optional[Path]:
-    candidate_stems: List[str] = []
-
-    if card_name in RWS_MAJOR_IMAGE_STEMS:
-        candidate_stems.append(RWS_MAJOR_IMAGE_STEMS[card_name])
-    if card_name in RWS_MINOR_IMAGE_STEMS:
-        candidate_stems.append(RWS_MINOR_IMAGE_STEMS[card_name])
-
-    candidate_stems.extend([
-        card_name,
-        f"TarotRWS-{slugify(card_name)}",
-        slugify(card_name),
-    ])
-
-    for stem in candidate_stems:
-        path = IMAGE_INDEX.get(slugify(stem))
-        if path:
-            return path
-    return None
+    return find_media(card_name, prefer_sticker=False)
 
 
 def render_image(path: Path, rev: bool) -> BytesIO:
@@ -216,6 +289,255 @@ def split_text(text: str, limit: int = 3800) -> List[str]:
     if text:
         parts.append(text)
     return parts
+
+
+
+def pack_sticker_emoji(card_name: str) -> str:
+    if card_name in TAROT_MAJOR:
+        return "🔮"
+    if "de Copas" in card_name:
+        return "❤️"
+    if "de Paus" in card_name:
+        return "🔥"
+    if "de Espadas" in card_name:
+        return "⚔️"
+    if "de Ouros" in card_name:
+        return "💰"
+    return "🃏"
+
+
+def build_tigrot_pack_zip() -> tuple[Path, Path]:
+    if not STICKER_ROOT.exists():
+        raise FileNotFoundError(f"Pasta de stickers não encontrada: {STICKER_ROOT}")
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="tigrot_pack_"))
+    zip_path = tmpdir / f"{TIGROT_PACK_NAME}.zip"
+    manifest: List[Dict[str, Any]] = []
+
+    readme = f"""Pacote de stickers {TIGROT_PACK_DISPLAY_NAME}
+
+Como usar:
+1. Abra o bot @Stickers no Telegram.
+2. Crie um novo pacote.
+3. Envie as imagens deste pacote na ordem que preferir.
+4. Associe um emoji por sticker, usando o padrão sugerido no manifesto.
+
+Origem: {STICKER_ROOT.as_posix()}
+"""
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for card in ALL_CARDS:
+            src = find_sticker(card)
+            if not src:
+                continue
+            zf.write(src, arcname=src.name)
+            manifest.append({
+                "card": card,
+                "file": src.name,
+                "emoji": pack_sticker_emoji(card),
+            })
+        zf.writestr("README.txt", readme)
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "pack_display_name": TIGROT_PACK_DISPLAY_NAME,
+                    "pack_name": TIGROT_PACK_NAME,
+                    "source": STICKER_ROOT.as_posix(),
+                    "items": manifest,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
+    return zip_path, tmpdir
+
+
+def tigrot_help_text() -> str:
+    return (
+        f"🎨 <b>{html.escape(TIGROT_PACK_DISPLAY_NAME)}</b>\n\n"
+        "Este pacote foi preparado com as artes de <b>/assets/rws-png</b> e pode ser criado automaticamente como sticker set do Telegram.\n\n"
+        "Fluxo recomendado:\n"
+        "1. Baixe o ZIP.\n"
+        "2. Abra o @Stickers.\n"
+        "3. Crie um novo pacote.\n"
+        "4. Ou use /criarpack para gerar o pacote automaticamente.\n"
+        "5. Atribua os emojis sugeridos no manifesto, se preferir ajustar manualmente.\n\n"
+        "Melhorias úteis para o fluxo atual:\n"
+        "• usar um emoji padrão por naipe nos arcanos menores;\n"
+        "• destacar invertidas com um sticker espelhado;\n"
+        "• criar respostas rápidas com sticker para finalização positiva, alerta e conselho;\n"
+        "• mostrar uma prévia em sticker antes da leitura final."
+    )
+
+
+def tigrot_menu_kb() -> InlineKeyboardMarkup:
+    rows = []
+    if TIGROT_PACK_URL:
+        rows.append([InlineKeyboardButton("➕ Abrir pacote", url=TIGROT_PACK_URL)])
+    rows.extend(
+        [
+            [InlineKeyboardButton("📦 Baixar ZIP", callback_data="tigrot:zip")],
+            [InlineKeyboardButton("🧾 Como adicionar", callback_data="tigrot:help")],
+            [InlineKeyboardButton("🖼️ Ver amostras", callback_data="tigrot:sample")],
+            [InlineKeyboardButton("🧱 Criar pack", callback_data="tigrot:create")],
+            [InlineKeyboardButton("🔙 Voltar", callback_data="tigrot:back")],
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_tigrot_zip(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    zip_path, tmpdir = build_tigrot_pack_zip()
+    try:
+        with zip_path.open("rb") as fp:
+            await ctx.bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(fp, filename=zip_path.name),
+                caption=(
+                    f"📦 Pacote {html.escape(TIGROT_PACK_DISPLAY_NAME)} pronto.\n"
+                    "Use o arquivo como base para criar o pacote no @Stickers."
+                ),
+                parse_mode="HTML",
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _sticker_set_name(bot_username: str) -> str:
+    safe = re.sub(r"[^a-z0-9_]+", "", (bot_username or "").lower())
+    prefix = re.sub(r"[^a-z0-9_]+", "", slugify(TIGROT_PACK_NAME).replace("-", "_"))
+    return f"{prefix}_by_{safe}" if safe else prefix
+
+
+async def _build_input_stickers() -> tuple[List[InputSticker], List[InputSticker], List[Path]]:
+    stickers: List[InputSticker] = []
+    deferred: List[InputSticker] = []
+    paths_used: List[Path] = []
+
+    for card in ALL_CARDS:
+        src = find_sticker(card)
+        if not src or src.suffix.lower() not in {".png", ".webp"}:
+            continue
+
+        paths_used.append(src)
+        emoji = pack_sticker_emoji(card)
+        sticker = InputSticker(sticker=src, emoji_list=[emoji])
+        if len(stickers) < 50:
+            stickers.append(sticker)
+        else:
+            deferred.append(sticker)
+
+    return stickers, deferred, paths_used
+
+
+async def create_tigrot_pack(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    me = await ctx.bot.get_me()
+    set_name = _sticker_set_name(me.username or "")
+    title = TIGROT_PACK_DISPLAY_NAME.strip("/") or TIGROT_PACK_NAME
+
+    try:
+        initial_stickers, remaining_stickers, used_paths = await _build_input_stickers()
+
+        if not initial_stickers:
+            await update.message.reply_text(
+                "⚠️ Não encontrei arquivos PNG/WebP suficientes em /assets/rws-png para criar o pacote."
+            )
+            return
+
+        await ctx.bot.create_new_sticker_set(
+            user_id=update.effective_user.id,
+            name=set_name,
+            title=title,
+            stickers=initial_stickers,
+        )
+
+        for sticker in remaining_stickers:
+            await ctx.bot.add_sticker_to_set(
+                user_id=update.effective_user.id,
+                name=set_name,
+                sticker=sticker,
+            )
+
+        await update.message.reply_text(
+            f"✅ Pack criado com sucesso: https://t.me/addstickers/{set_name}\n"
+            f"🃏 Cartas incluídas: {len(used_paths)}"
+        )
+    except Exception as e:
+        logger.exception("Falha ao criar o pack TIGROT")
+        await update.message.reply_text(f"Erro ao criar o pack TIGROT: {e}")
+
+
+async def send_tigrot_samples(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    sample_cards = [
+        "O Louco",
+        "A Sacerdotisa",
+        "O Carro",
+        "O Sol",
+        "Ás de Copas",
+        "Dez de Espadas",
+        "Rei de Ouros",
+    ]
+    for card in sample_cards:
+        img = find_sticker(card) or find_image(card)
+        if not img:
+            continue
+        if img.suffix.lower() in {".png", ".webp"}:
+            await ctx.bot.send_sticker(chat_id=chat_id, sticker=img)
+        else:
+            b = render_image(img, False)
+            await ctx.bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(b),
+                caption=f"🧩 {html.escape(card)}",
+                parse_mode="HTML",
+            )
+
+
+async def send_card(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, card: Dict[str, Any]) -> None:
+    path = find_media(card["name"], prefer_sticker=True)
+    if not path:
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=f"🃏 <b>{html.escape(card['name'])}</b> ({'invertida' if card['rev'] else 'normal'})",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        if path.suffix.lower() in {".png", ".webp"}:
+            if card["rev"]:
+                with Image.open(path) as img:
+                    img = ImageOps.exif_transpose(img)
+                    img = img.rotate(180, expand=True)
+                    b = BytesIO()
+                    img.save(b, "PNG")
+                    b.seek(0)
+                    await ctx.bot.send_sticker(
+                        chat_id=chat_id,
+                        sticker=InputFile(b, filename=f"{slugify(card['name'])}.png"),
+                    )
+            else:
+                await ctx.bot.send_sticker(chat_id=chat_id, sticker=path)
+        else:
+            b = render_image(path, card["rev"])
+            await ctx.bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(b, filename=f"{slugify(card['name'])}.png"),
+                caption=f"🃏 {html.escape(card['name'])} ({'invertida' if card['rev'] else 'normal'})",
+                parse_mode="HTML",
+            )
+    except Exception:
+        logger.exception("Falha ao enviar mídia da carta %s", card["name"])
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=f"🃏 <b>{html.escape(card['name'])}</b> ({'invertida' if card['rev'] else 'normal'})",
+            parse_mode="HTML",
+        )
 
 
 
@@ -410,6 +732,7 @@ def menu_grupos() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔥 Paus", callback_data="g:Paus")],
         [InlineKeyboardButton("⚔️ Espadas", callback_data="g:Espadas")],
         [InlineKeyboardButton("💰 Ouros", callback_data="g:Ouros")],
+        [InlineKeyboardButton("🎨 TIGROT", callback_data="tigrot:menu")],
     ])
 
 
@@ -508,6 +831,19 @@ async def ler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=menu_grupos(),
         parse_mode="HTML"
     )
+
+
+async def tigrot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        tigrot_help_text(),
+        reply_markup=tigrot_menu_kb(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def criarpack_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await create_tigrot_pack(update, ctx)
 
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -805,6 +1141,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ler", ler))
     app.add_handler(CommandHandler("tirar", tirar))
+    app.add_handler(CommandHandler("tigrot", tigrot))
+    app.add_handler(CommandHandler("stickers", tigrot))
+    app.add_handler(CommandHandler("criarpack", criarpack_cmd))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CallbackQueryHandler(cb))
