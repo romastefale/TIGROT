@@ -1,2 +1,3 @@
 python-telegram-bot[webhooks]>=21.8,<22
 google-genai>=1.0.0,<2
+Pillow>=10,<12
