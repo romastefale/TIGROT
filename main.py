@@ -484,20 +484,21 @@ def tiragem_preview_text(tir_id: str) -> str:
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-    "🔮 <b>Bem-vindo ao Tarot Interativo</b>\n\n"
-    "Aqui você pode explorar o <b>Tarot Rider-Waite</b> de forma clara, intuitiva e completa.\n\n"
-    "🃏 <b>Escolha suas cartas manualmente</b>\n"
-    "🎲 <b>Faça tiragens guiadas e automáticas</b>\n"
-    "🧠 <b>Receba interpretações didáticas</b>\n"
-    "   • Significado\n"
-    "   • Pontos positivos\n"
-    "   • Desafios\n"
-    "   • Visão global\n\n"
-    "🖼️ Cartas com imagens reais\n"
-    "✨ Um espaço para estudo, reflexão e autoconhecimento\n\n"
-    "👇 <i>Use os botões abaixo para iniciar sua leitura</i>",
-    reply_markup=menu_grupos(),
-    parse_mode="HTML"
+        "🔮 <b>Bem-vindo ao Tarot Interativo</b>\n\n"
+        "Aqui você pode explorar o <b>Tarot Rider-Waite</b> de forma clara, intuitiva e completa.\n\n"
+        "🃏 <b>Escolha suas cartas manualmente</b>\n"
+        "🎲 <b>Faça tiragens guiadas e automáticas</b>\n"
+        "🧠 <b>Receba interpretações didáticas</b>\n"
+        "   • Significado\n"
+        "   • Pontos positivos\n"
+        "   • Desafios\n"
+        "   • Visão global\n\n"
+        "<b>Comandos:</b>\n"
+        "/ler - 🔮 Escolher cartas manualmente\n"
+        "/tirar - 🎲 Sortear cartas automaticamente\n\n"
+        "👇 <i>Ou use os botões abaixo para iniciar sua interpretação</i>",
+        reply_markup=menu_grupos(),
+        parse_mode="HTML"
     )
 
 async def ler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
