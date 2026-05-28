@@ -12,10 +12,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import redis.asyncio as redis
-from google import genai
 from PIL import Image, ImageOps
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,9 +29,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tarot_bot")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+
+# ---------------- PONTE @mira ----------------
+# A interpretação agora vem do bot @mira no mesmo grupo (sem Gemini).
+TIGROT_GROUP_ID = int(os.getenv("TIGROT_GROUP_ID", "-5258446619"))
+MIRA_PREFIX = os.getenv("MIRA_PREFIX", "@mira").strip()
+MIRA_USERNAME = os.getenv("MIRA_USERNAME", "mira").strip().lstrip("@").lower()
+_MIRA_USER_ID_RAW = os.getenv("MIRA_USER_ID", "").strip()
+MIRA_USER_ID: Optional[int] = int(_MIRA_USER_ID_RAW) if _MIRA_USER_ID_RAW else None
+MIRA_WAIT_TIMEOUT = int(os.getenv("MIRA_WAIT_TIMEOUT", "240"))
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "3600"))
@@ -37,7 +50,7 @@ CARDS_PER_PAGE = 8
 
 SESSIONS: Dict[int, Dict[str, Any]] = {}
 
-IMAGE_ROOT = Path(os.getenv("RWS_IMAGE_DIR", "assets/rws"))
+IMAGE_ROOT = Path(os.getenv("RWS_IMAGE_DIR", "assets/rws-png"))
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
@@ -331,83 +344,131 @@ async def cleanup_sessions_task() -> None:
             logger.exception("Falha na limpeza automática de sessões")
         await asyncio.sleep(SESSION_CLEANUP_SECONDS)
 
-# ---------------- GEMINI ----------------
+# ---------------- PONTE @mira ----------------
 
 if not BOT_TOKEN:
-    raise RuntimeError("Defina a variável de ambiente BOT_TOKEN.")
-if not GEMINI_API_KEY:
-    raise RuntimeError("Defina GEMINI_API_KEY ou GOOGLE_API_KEY.")
+    raise RuntimeError("Defina a variável de ambiente BOT_TOKEN (ou TELEGRAM_BOT_TOKEN).")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-
+# Map: message_id da nossa pergunta enviada no grupo -> Future aguardando a resposta.
+_pending_by_relay: Dict[int, "asyncio.Future[str]"] = {}
 
 
-
-def build_prompt(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
-    txt = "\n".join(
+def _cards_block(cards: List[Dict[str, Any]]) -> str:
+    return "\n".join(
         f"{i + 1}. {c['name']} ({'invertida' if c['rev'] else 'normal'})"
         for i, c in enumerate(cards)
     )
 
+
+def build_prompt_tecnica(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
     tiragem_line = f"Tiragem: {tiragem_name}\n" if tiragem_name else ""
-
-    tiragem_rules = ""
-    if tiragem_name == "Carta do Dia / Sim ou Não":
-        tiragem_rules = (
-            "Seja direto, objetivo e conclusivo. "
-            "Trate a resposta como curta e prática."
-        )
-    elif tiragem_name in {"Passado, Presente e Futuro", "Situação, Desafio e Conselho"}:
-        tiragem_rules = "Organize a leitura em sequência lógica, mostrando a evolução entre as posições."
-    elif tiragem_name in {"Tiragem Péladan", "Ferradura", "Cruz Celta", "Mandala Astrológica"}:
-        tiragem_rules = "Aprofunde as interações entre cartas, tensões, obstáculos e desfechos com bastante contexto."
-
-    return f"""
-Você é um intérprete didático de tarot.
-
-{tiragem_line}{('Regra da tiragem: ' + tiragem_rules + '\n') if tiragem_rules else ''}Responda em PORTUGUÊS DO BRASIL e use APENAS HTML do Telegram para formatação (<b>, <i>).
-NUNCA invente tags como <tg-b> ou <tg-i>.
-Não use asteriscos literais para negrito ou itálico.
-Use emojis relacionados ao conteúdo.
-Use este formato:
-
-<b>🃏 Carta 1 — NOME</b>
-
-<i>Significado:</i> 
-...
-
-<i>Ponto positivo:</i> 
-...
-
-<i>Ponto negativo:</i> 
-...
-
-<b>🔗 Combinações</b>
-...
-
-<b>🌙 Visão global</b>
-...
-
-Regras:
-- Não omita aspectos negativos.
-- Não suavize o que for difícil.
-- Não afirme certezas absolutas.
-- Seja claro, direto e didático.
-- Se a carta estiver invertida, interprete isso de forma explícita.
-- Traga a leitura por tiragem quando houver nome informado.
-- Termine com uma sensação de fechamento coerente com a tiragem.
-
-Cartas:
-{txt}
-""".strip()
-
-
-def ai(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=build_prompt(cards, tiragem_name),
+    return (
+        f"{MIRA_PREFIX} faz a LEITURA TÉCNICA dessas cartas do Tarot Rider-Waite-Smith.\n"
+        f"{tiragem_line}"
+        "Vá carta por carta na ordem informada. Para cada uma traga: significado clássico, "
+        "ponto positivo, ponto negativo e, se invertida, interprete a inversão explicitamente. "
+        "No fim, comente combinações e dê uma visão global coerente com a tiragem.\n"
+        "Responda em PORTUGUÊS DO BRASIL.\n\n"
+        f"Cartas:\n{_cards_block(cards)}"
     )
-    return (response.text or "").strip()
+
+
+def build_prompt_preditiva(cards: List[Dict[str, Any]], tiragem_name: Optional[str] = None) -> str:
+    tiragem_line = f"Tiragem: {tiragem_name}\n" if tiragem_name else ""
+    return (
+        f"{MIRA_PREFIX} agora faz a LEITURA PREDITIVA GERAL dessas mesmas cartas.\n"
+        f"{tiragem_line}"
+        "Seja ousada, direta e prática: o que tende a acontecer, prazos aproximados quando "
+        "fizer sentido, riscos concretos, oportunidades e conselho final acionável. "
+        "Não suavize o que for difícil, mas não afirme certezas absolutas. "
+        "Responda em PORTUGUÊS DO BRASIL.\n\n"
+        f"Cartas:\n{_cards_block(cards)}"
+    )
+
+
+async def ask_mira(bot, prompt: str) -> str:
+    """Envia uma pergunta para @mira no grupo TIGROT_GROUP_ID e aguarda a resposta dela."""
+    loop = asyncio.get_running_loop()
+    fut: "asyncio.Future[str]" = loop.create_future()
+
+    text = prompt if prompt.lstrip().lower().startswith(MIRA_PREFIX.lower()) else f"{MIRA_PREFIX} {prompt}"
+    sent = await bot.send_message(chat_id=TIGROT_GROUP_ID, text=text, disable_web_page_preview=True)
+    _pending_by_relay[sent.message_id] = fut
+    logger.info("MIRA_RELAY_SENT | mid=%s | chars=%d", sent.message_id, len(text))
+
+    try:
+        return await asyncio.wait_for(fut, timeout=MIRA_WAIT_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("MIRA_TIMEOUT | mid=%s", sent.message_id)
+        raise
+    finally:
+        _pending_by_relay.pop(sent.message_id, None)
+
+
+async def mira_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Roteia respostas do @mira (reply à nossa pergunta) para o Future correspondente."""
+    msg = update.effective_message
+    if not msg or not msg.reply_to_message:
+        return
+    if msg.chat_id != TIGROT_GROUP_ID:
+        return
+
+    sender = msg.from_user
+    if not sender:
+        return
+    sender_username = (sender.username or "").lstrip("@").lower()
+    if sender_username != MIRA_USERNAME:
+        return
+
+    relay_id = msg.reply_to_message.message_id
+    fut = _pending_by_relay.get(relay_id)
+    if not fut or fut.done():
+        return
+
+    answer = (msg.text or msg.caption or "").strip()
+    if not answer:
+        return
+    fut.set_result(answer)
+    logger.info("MIRA_ANSWER | relay=%s | chars=%d", relay_id, len(answer))
+
+
+async def interpretar(bot, cards: List[Dict[str, Any]], tiragem_name: Optional[str]) -> Dict[str, str]:
+    """Pede ao @mira as duas leituras (técnica e preditiva). Falhas viram aviso amigável."""
+    out: Dict[str, str] = {}
+    try:
+        out["tecnica"] = await ask_mira(bot, build_prompt_tecnica(cards, tiragem_name))
+    except Exception:
+        logger.exception("Falha ao obter leitura técnica do @mira")
+        out["tecnica"] = "⚠️ A leitura técnica do @mira não chegou a tempo."
+    try:
+        out["preditiva"] = await ask_mira(bot, build_prompt_preditiva(cards, tiragem_name))
+    except Exception:
+        logger.exception("Falha ao obter leitura preditiva do @mira")
+        out["preditiva"] = "⚠️ A leitura preditiva do @mira não chegou a tempo."
+    return out
+
+
+async def enviar_interpretacao(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, cards: List[Dict[str, Any]], tiragem_name: Optional[str]) -> None:
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text="🔮 Encaminhando ao <b>@mira</b> para interpretação...",
+        parse_mode="HTML",
+    )
+    leituras = await interpretar(ctx.bot, cards, tiragem_name)
+
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text="🧩 <b>Leitura técnica</b>",
+        parse_mode="HTML",
+    )
+    await send_split_message(chat_id, leituras["tecnica"], ctx)
+
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text="🌠 <b>Leitura preditiva geral</b>",
+        parse_mode="HTML",
+    )
+    await send_split_message(chat_id, leituras["preditiva"], ctx)
 
 def menu_grupos() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -586,23 +647,7 @@ async def _run_tiragem(chat_id: int, uid: int, tiragem_id: str, tiragem_name: st
                 parse_mode="HTML",
             )
 
-    try:
-        res = await asyncio.to_thread(ai, result, tiragem_name)
-    except Exception:
-        logger.exception("Erro ao gerar interpretação do Gemini")
-        res = "⚠️ Erro ao gerar interpretação no momento."
-
-    partes = split_text(res)
-    if not partes:
-        partes = ["Sem resposta de interpretação no momento."]
-
-    for p in partes:
-        await ctx.bot.send_message(
-            chat_id=chat_id,
-            text=prepare_telegram_html(p.strip()),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+    await enviar_interpretacao(chat_id, ctx, result, tiragem_name)
 
     await ctx.bot.send_message(
         chat_id=chat_id,
@@ -773,23 +818,7 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML",
                 )
 
-        try:
-            res = await asyncio.to_thread(ai, cards, None)
-        except Exception:
-            logger.exception("Erro ao gerar interpretação do Gemini")
-            res = "⚠️ Erro ao gerar interpretação no momento."
-
-        partes = split_text(res)
-        if not partes:
-            partes = ["Sem resposta de interpretação no momento."]
-
-        for p in partes:
-            await ctx.bot.send_message(
-                chat_id=q.message.chat.id,
-                text=prepare_telegram_html(p.strip()),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+        await enviar_interpretacao(q.message.chat.id, ctx, cards, None)
 
         await ctx.bot.send_message(
             chat_id=q.message.chat.id,
@@ -814,6 +843,12 @@ def main():
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CallbackQueryHandler(cb))
+    app.add_handler(
+        MessageHandler(
+            filters.Chat(chat_id=TIGROT_GROUP_ID) & filters.REPLY & (filters.TEXT | filters.CAPTION),
+            mira_router,
+        )
+    )
 
     app.run_polling(drop_pending_updates=True)
 
