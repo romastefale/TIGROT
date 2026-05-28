@@ -38,7 +38,11 @@ MIRA_PREFIX = os.getenv("MIRA_PREFIX", "@mira").strip()
 MIRA_USERNAME = os.getenv("MIRA_USERNAME", "mira").strip().lstrip("@").lower()
 _MIRA_USER_ID_RAW = os.getenv("MIRA_USER_ID", "").strip()
 MIRA_USER_ID: Optional[int] = int(_MIRA_USER_ID_RAW) if _MIRA_USER_ID_RAW else None
-MIRA_WAIT_TIMEOUT = int(os.getenv("MIRA_WAIT_TIMEOUT", "240"))
+MIRA_WAIT_TIMEOUT = int(os.getenv("MIRA_WAIT_TIMEOUT", "600"))
+# Tempo de "assentamento": a Mira costuma editar/streamar a resposta. Depois de
+# receber (ou ver editada) a última parte, esperamos esse tanto sem novas
+# alterações antes de considerar a resposta completa.
+MIRA_SETTLE_SECONDS = float(os.getenv("MIRA_SETTLE_SECONDS", "8"))
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "3600"))
@@ -349,8 +353,37 @@ async def cleanup_sessions_task() -> None:
 if not BOT_TOKEN:
     raise RuntimeError("Defina a variável de ambiente BOT_TOKEN (ou TELEGRAM_BOT_TOKEN).")
 
-# Map: message_id da nossa pergunta enviada no grupo -> Future aguardando a resposta.
-_pending_by_relay: Dict[int, "asyncio.Future[str]"] = {}
+class _MiraPending:
+    """Acumula a resposta da Mira (que costuma chegar editada/em partes)."""
+
+    def __init__(self, loop: "asyncio.AbstractEventLoop") -> None:
+        self.future: "asyncio.Future[str]" = loop.create_future()
+        self.loop = loop
+        # message_id da Mira -> texto mais recente daquela mensagem.
+        self.parts: Dict[int, str] = {}
+        self._settle_handle: Optional["asyncio.TimerHandle"] = None
+
+    def merged_text(self) -> str:
+        return "\n\n".join(self.parts[k] for k in sorted(self.parts)).strip()
+
+    def update_part(self, message_id: int, text: str) -> None:
+        self.parts[message_id] = text
+        if self._settle_handle is not None:
+            self._settle_handle.cancel()
+        self._settle_handle = self.loop.call_later(MIRA_SETTLE_SECONDS, self._settle)
+
+    def _settle(self) -> None:
+        if not self.future.done():
+            self.future.set_result(self.merged_text())
+
+    def cancel_timer(self) -> None:
+        if self._settle_handle is not None:
+            self._settle_handle.cancel()
+            self._settle_handle = None
+
+
+# Map: message_id da nossa pergunta enviada no grupo -> estado da resposta.
+_pending_by_relay: Dict[int, _MiraPending] = {}
 
 
 def _cards_block(cards: List[Dict[str, Any]]) -> str:
@@ -387,26 +420,37 @@ def build_prompt_preditiva(cards: List[Dict[str, Any]], tiragem_name: Optional[s
 
 
 async def ask_mira(bot, prompt: str) -> str:
-    """Envia uma pergunta para @mira no grupo TIGROT_GROUP_ID e aguarda a resposta dela."""
+    """Envia uma pergunta para @mira no grupo TIGROT_GROUP_ID e aguarda a resposta dela.
+
+    A Mira costuma responder editando a mensagem (streaming) ou em várias partes,
+    então acumulamos tudo e só consideramos pronto após MIRA_SETTLE_SECONDS sem
+    novas alterações (debounce). Timeout total: MIRA_WAIT_TIMEOUT.
+    """
     loop = asyncio.get_running_loop()
-    fut: "asyncio.Future[str]" = loop.create_future()
+    pending = _MiraPending(loop)
 
     text = prompt if prompt.lstrip().lower().startswith(MIRA_PREFIX.lower()) else f"{MIRA_PREFIX} {prompt}"
     sent = await bot.send_message(chat_id=TIGROT_GROUP_ID, text=text, disable_web_page_preview=True)
-    _pending_by_relay[sent.message_id] = fut
+    _pending_by_relay[sent.message_id] = pending
     logger.info("MIRA_RELAY_SENT | mid=%s | chars=%d", sent.message_id, len(text))
 
     try:
-        return await asyncio.wait_for(fut, timeout=MIRA_WAIT_TIMEOUT)
+        return await asyncio.wait_for(pending.future, timeout=MIRA_WAIT_TIMEOUT)
     except asyncio.TimeoutError:
-        logger.warning("MIRA_TIMEOUT | mid=%s", sent.message_id)
+        # Se chegou algo parcial antes do timeout, entrega o que veio.
+        partial = pending.merged_text()
+        if partial:
+            logger.warning("MIRA_TIMEOUT_PARTIAL | mid=%s | chars=%d", sent.message_id, len(partial))
+            return partial
+        logger.warning("MIRA_TIMEOUT_EMPTY | mid=%s", sent.message_id)
         raise
     finally:
+        pending.cancel_timer()
         _pending_by_relay.pop(sent.message_id, None)
 
 
 async def mira_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Roteia respostas do @mira (reply à nossa pergunta) para o Future correspondente."""
+    """Roteia respostas da Mira (reply à nossa pergunta, inclusive editadas) ao pending."""
     msg = update.effective_message
     if not msg or not msg.reply_to_message:
         return
@@ -421,15 +465,21 @@ async def mira_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     relay_id = msg.reply_to_message.message_id
-    fut = _pending_by_relay.get(relay_id)
-    if not fut or fut.done():
+    pending = _pending_by_relay.get(relay_id)
+    if pending is None:
+        logger.info("MIRA_REPLY_NO_PENDING | relay=%s | mid=%s", relay_id, msg.message_id)
+        return
+    if pending.future.done():
         return
 
     answer = (msg.text or msg.caption or "").strip()
     if not answer:
         return
-    fut.set_result(answer)
-    logger.info("MIRA_ANSWER | relay=%s | chars=%d", relay_id, len(answer))
+    pending.update_part(msg.message_id, answer)
+    logger.info(
+        "MIRA_PART | relay=%s | mid=%s | edit=%s | chars=%d",
+        relay_id, msg.message_id, bool(update.edited_message), len(answer),
+    )
 
 
 async def interpretar(bot, cards: List[Dict[str, Any]], tiragem_name: Optional[str]) -> Dict[str, str]:
