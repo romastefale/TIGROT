@@ -129,33 +129,21 @@ TIRAGENS = {
     },
 }
 
-RWS_MAJOR_IMAGE_STEMS = {
-    "O Louco": "TarotRWS-00-louco",
-    "O Mago": "TarotRWS-01-mago",
-    "A Sacerdotisa": "TarotRWS-02-alta-sacerdotisa",
-    "A Imperatriz": "TarotRWS-03-imperatriz",
-    "O Imperador": "TarotRWS-04-imperador",
-    "O Hierofante": "TarotRWS-05-hierofante",
-    "Os Enamorados": "TarotRWS-06-enamorados",
-    "O Carro": "TarotRWS-07-carro",
-    "A Força": "TarotRWS-08-forca",
-    "O Eremita": "TarotRWS-09-eremita",
-    "A Roda da Fortuna": "TarotRWS-10-roda",
-    "A Justiça": "TarotRWS-11-justica",
-    "O Enforcado": "TarotRWS-12-pendurado",
-    "A Morte": "TarotRWS-13-morte",
-    "A Temperança": "TarotRWS-14-temperanca",
-    "O Diabo": "TarotRWS-15-diabo",
-    "A Torre": "TarotRWS-16-torre",
-    "A Estrela": "TarotRWS-17-estrela",
-    "A Lua": "TarotRWS-18-lua",
-    "O Sol": "TarotRWS-19-sol",
-    "O Julgamento": "TarotRWS-20-julgamento",
-    "O Mundo": "TarotRWS-21-mundo",
-}
+# Os arquivos reais em assets/rws-png/ usam estes nomes (slug do nome do
+# arquivo). Os maiores são "NN-slug" (ex.: 00-louco, 08-força, 20-julgamento)
+# e os menores são "Naipe-NN" (ex.: Copas-01). O find_image normaliza via
+# slugify, então acentos (força/temperança) casam igual.
+_RWS_MAJOR_SLUGS = [
+    "00-louco", "01-mago", "02-alta-sacerdotisa", "03-imperatriz", "04-imperador",
+    "05-hierofante", "06-enamorados", "07-carro", "08-forca", "09-eremita",
+    "10-roda", "11-justica", "12-pendurado", "13-morte", "14-temperanca",
+    "15-diabo", "16-torre", "17-estrela", "18-lua", "19-sol",
+    "20-julgamento", "21-mundo",
+]
+RWS_MAJOR_IMAGE_STEMS = dict(zip(TAROT_MAJOR, _RWS_MAJOR_SLUGS))
 
 RWS_MINOR_IMAGE_STEMS = {
-    f"{rank} de {suit}": f"TarotRWS-{suit}-{idx:02d}"
+    f"{rank} de {suit}": f"{suit}-{idx:02d}"
     for suit in SUITS
     for idx, rank in enumerate(RANKS, 1)
 }
