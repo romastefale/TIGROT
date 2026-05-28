@@ -439,19 +439,19 @@ async def interpretar(bot, cards: List[Dict[str, Any]], tiragem_name: Optional[s
         out["tecnica"] = await ask_mira(bot, build_prompt_tecnica(cards, tiragem_name))
     except Exception:
         logger.exception("Falha ao obter leitura técnica do @mira")
-        out["tecnica"] = "⚠️ A leitura técnica do @mira não chegou a tempo."
+        out["tecnica"] = "⚠️ A leitura técnica não chegou a tempo."
     try:
         out["preditiva"] = await ask_mira(bot, build_prompt_preditiva(cards, tiragem_name))
     except Exception:
         logger.exception("Falha ao obter leitura preditiva do @mira")
-        out["preditiva"] = "⚠️ A leitura preditiva do @mira não chegou a tempo."
+        out["preditiva"] = "⚠️ A leitura preditiva não chegou a tempo."
     return out
 
 
 async def enviar_interpretacao(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, cards: List[Dict[str, Any]], tiragem_name: Optional[str]) -> None:
     await ctx.bot.send_message(
         chat_id=chat_id,
-        text="🔮 Encaminhando ao <b>@mira</b> para interpretação...",
+        text="🔮 Preparando a interpretação das cartas...",
         parse_mode="HTML",
     )
     leituras = await interpretar(ctx.bot, cards, tiragem_name)
