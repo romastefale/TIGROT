@@ -908,7 +908,16 @@ async def post_init(app: Application):
 
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    # concurrent_updates: essencial. Sem isso (padrão = 1 update por vez), o
+    # ask_mira() bloqueia o único slot enquanto aguarda, e o mira_router nunca
+    # roda até dar timeout — a resposta da Mira jamais é reconhecida.
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .concurrent_updates(True)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ler", ler))
