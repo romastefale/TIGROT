@@ -450,35 +450,58 @@ async def ask_mira(bot, prompt: str) -> str:
 
 
 async def mira_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Roteia respostas da Mira (reply à nossa pergunta, inclusive editadas) ao pending."""
+    """Roteia respostas da Mira ao pending ativo.
+
+    O reconhecimento é tolerante: aceita tanto reply formal à nossa pergunta
+    quanto qualquer mensagem da Mira enquanto houver uma pergunta pendente
+    (as perguntas são sequenciais, então no máximo uma fica ativa por vez).
+    Também trata mensagens editadas (streaming) e respostas em partes.
+    """
     msg = update.effective_message
-    if not msg or not msg.reply_to_message:
-        return
-    if msg.chat_id != TIGROT_GROUP_ID:
+    if not msg or msg.chat_id != TIGROT_GROUP_ID:
         return
 
     sender = msg.from_user
     if not sender:
         return
     sender_username = (sender.username or "").lstrip("@").lower()
+    text = (msg.text or msg.caption or "").strip()
+
+    # Diagnóstico: registra TODA mensagem recebida no grupo. Se a Mira não
+    # aparecer aqui como from=@mira, o bot não está recebendo as mensagens dela
+    # (limitação bot-a-bot do Telegram) — nesse caso é preciso um userbot.
+    logger.info(
+        "GROUP_MSG | from=@%s | uid=%s | reply_to=%s | edit=%s | chars=%d",
+        sender_username, sender.id,
+        msg.reply_to_message.message_id if msg.reply_to_message else None,
+        bool(update.edited_message), len(text),
+    )
+
     if sender_username != MIRA_USERNAME:
         return
-
-    relay_id = msg.reply_to_message.message_id
-    pending = _pending_by_relay.get(relay_id)
-    if pending is None:
-        logger.info("MIRA_REPLY_NO_PENDING | relay=%s | mid=%s", relay_id, msg.message_id)
-        return
-    if pending.future.done():
+    if not _pending_by_relay:
+        logger.info("MIRA_MSG_NO_PENDING | mid=%s", msg.message_id)
         return
 
-    answer = (msg.text or msg.caption or "").strip()
-    if not answer:
+    # 1) preferir casar pelo reply à nossa pergunta
+    pending = None
+    relay_id = None
+    if msg.reply_to_message:
+        relay_id = msg.reply_to_message.message_id
+        pending = _pending_by_relay.get(relay_id)
+    # 2) fallback: única pergunta ativa
+    if pending is None and len(_pending_by_relay) == 1:
+        relay_id, pending = next(iter(_pending_by_relay.items()))
+
+    if pending is None or pending.future.done():
         return
-    pending.update_part(msg.message_id, answer)
+    if not text:
+        return
+
+    pending.update_part(msg.message_id, text)
     logger.info(
         "MIRA_PART | relay=%s | mid=%s | edit=%s | chars=%d",
-        relay_id, msg.message_id, bool(update.edited_message), len(answer),
+        relay_id, msg.message_id, bool(update.edited_message), len(text),
     )
 
 
@@ -895,12 +918,15 @@ def main():
     app.add_handler(CallbackQueryHandler(cb))
     app.add_handler(
         MessageHandler(
-            filters.Chat(chat_id=TIGROT_GROUP_ID) & filters.REPLY & (filters.TEXT | filters.CAPTION),
+            filters.Chat(chat_id=TIGROT_GROUP_ID) & (filters.TEXT | filters.CAPTION),
             mira_router,
         )
     )
 
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "edited_message", "callback_query"],
+    )
 
 
 if __name__ == "__main__":
