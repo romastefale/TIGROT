@@ -883,7 +883,12 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             img = find_image(c["name"])
             if img:
                 b = render_image(img, c["rev"])
-                await ctx.bot.send_photo(chat_id=q.message.chat.id, photo=InputFile(b))
+                await ctx.bot.send_photo(
+                    chat_id=q.message.chat.id,
+                    photo=InputFile(b),
+                    caption=f"🃏 {html.escape(c['name'])} ({'invertida' if c['rev'] else 'normal'})",
+                    parse_mode="HTML",
+                )
             else:
                 await ctx.bot.send_message(
                     chat_id=q.message.chat.id,
