@@ -13,6 +13,11 @@ from typing import Any, Dict, List, Optional
 
 import redis.asyncio as redis
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+try:
+    from fontTools.ttLib import TTCollection, TTFont
+except Exception:  # fontTools é defesa extra; Dockerfile garante DejaVu no runtime.
+    TTCollection = None
+    TTFont = None
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, Update
 from telegram.ext import (
     Application,
@@ -422,9 +427,15 @@ def render_image(path: Path, rev: bool) -> BytesIO:
 
 
 _FONT_CACHE: Dict[tuple[int, bool], ImageFont.ImageFont] = {}
+_FONT_UNICODE_SAFE_BY_ID: Dict[int, bool] = {}
 _FONT_SEARCH_CACHE: Optional[List[str]] = None
 _FONT_WARNED = False
-_FONT_PROBE_TEXT = "Carta do Dia / Sim ou Não • 13 cartas — Ás Três Ouros Paus A Imperatriz"
+_FONT_PROBE_TEXT = (
+    "Carta do Dia / Sim ou Não - 13 cartas - "
+    "Situação Desafio Conselho Péladan Astrológica "
+    "Ás Três Força Justiça Temperança Copas Paus Espadas Ouros"
+)
+_FONT_REQUIRED_CHARS = set(_FONT_PROBE_TEXT)
 
 
 def _font_env_candidates(bold: bool) -> List[str]:
@@ -433,7 +444,7 @@ def _font_env_candidates(bold: bool) -> List[str]:
 
 
 def _font_file_candidates() -> List[str]:
-    """Descobre fontes instaladas sem empacotar nenhum arquivo de fonte no ZIP."""
+    """Descobre fontes instaladas sem empacotar arquivos de fonte no ZIP."""
     global _FONT_SEARCH_CACHE
     if _FONT_SEARCH_CACHE is not None:
         return _FONT_SEARCH_CACHE
@@ -457,8 +468,8 @@ def _font_file_candidates() -> List[str]:
             continue
 
     preferred_tokens = (
-        "times", "liberationserif", "dejavuserif", "notoserif", "freeserif",
-        "liberation", "dejavu", "noto", "freefont",
+        "dejavuserif", "liberationserif", "notoserif", "freeserif", "times",
+        "dejavu", "liberation", "noto", "freefont",
     )
 
     def score(path: str) -> tuple[int, str]:
@@ -473,43 +484,55 @@ def _font_file_candidates() -> List[str]:
 
 
 def _font_candidates(bold: bool) -> List[str]:
+    # Caminhos exatos do pacote Debian/Ubuntu fonts-dejavu-core instalado pelo Dockerfile.
+    pinned_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
+    ]
     names = [
-        "Times New Roman Bold.ttf" if bold else "Times New Roman.ttf",
-        "Times_New_Roman_Bold.ttf" if bold else "Times_New_Roman.ttf",
-        "timesbd.ttf" if bold else "times.ttf",
-        "LiberationSerif-Bold.ttf" if bold else "LiberationSerif-Regular.ttf",
         "DejaVuSerif-Bold.ttf" if bold else "DejaVuSerif.ttf",
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        "LiberationSerif-Bold.ttf" if bold else "LiberationSerif-Regular.ttf",
         "NotoSerif-Bold.ttf" if bold else "NotoSerif-Regular.ttf",
         "FreeSerifBold.ttf" if bold else "FreeSerif.ttf",
+        "Times New Roman Bold.ttf" if bold else "Times New Roman.ttf",
+        "Times_New_Roman_Bold.ttf" if bold else "Times_New_Roman.ttf",
     ]
-    paths = [
-        "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
-        "/usr/share/fonts/truetype/msttcorefonts/timesbd.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/times.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSerif.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    return _font_env_candidates(bold) + names + paths + _font_file_candidates()
+    return _font_env_candidates(bold) + pinned_paths + names + _font_file_candidates()
 
 
-def _font_can_encode(font: ImageFont.ImageFont, text: str = _FONT_PROBE_TEXT) -> bool:
+def _font_path_has_required_chars(path: str) -> bool:
+    """Verifica a tabela cmap da fonte, não apenas getmask(), que pode desenhar tofu."""
+    if not path or not Path(path).exists() or TTFont is None:
+        return False
+    required = {ord(ch) for ch in _FONT_REQUIRED_CHARS if ch}
     try:
-        font.getmask(text)
-        return True
+        if path.lower().endswith(".ttc") and TTCollection is not None:
+            collection = TTCollection(path)
+            fonts = collection.fonts
+        else:
+            fonts = [TTFont(path, fontNumber=0, lazy=True)]
+        for font in fonts:
+            cmap = set()
+            for table in font["cmap"].tables:
+                cmap.update(table.cmap.keys())
+            if required.issubset(cmap):
+                return True
     except Exception:
         return False
+    return False
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
-    """Fonte serifada para o mosaico visual, com fallback Unicode seguro.
+    """Fonte do mosaico com garantia anti-tofu.
 
-    Não empacotamos fonte no projeto. O bot tenta fontes instaladas no ambiente
-    Railway/Linux, aceita override por MOSAIC_FONT/MOSAIC_FONT_REGULAR/
-    MOSAIC_FONT_BOLD e só cai no default do Pillow em último caso.
+    Regra forte:
+    1) tentar fontes reais instaladas e validar cmap dos caracteres usados;
+    2) se nenhuma fonte Unicode segura existir, usar fallback ASCII sanitizado.
+
+    Isso evita quadrados no JPEG mesmo quando o ambiente não tem fonte adequada.
     """
     global _FONT_WARNED
     key = (size, bold)
@@ -519,30 +542,34 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
     for candidate in _font_candidates(bold):
         try:
             font = ImageFont.truetype(candidate, size)
-            if _font_can_encode(font):
+            unicode_safe = _font_path_has_required_chars(candidate)
+            if unicode_safe:
                 _FONT_CACHE[key] = font
+                _FONT_UNICODE_SAFE_BY_ID[id(font)] = True
                 return font
         except Exception:
             continue
 
     if not _FONT_WARNED:
-        logger.warning("MOSAIC_FONT_FALLBACK_DEFAULT | unicode_safe=false")
+        logger.warning("MOSAIC_FONT_UNSAFE_FALLBACK | unicode_safe=false | ascii_sanitizer=true")
         _FONT_WARNED = True
     try:
         font = ImageFont.load_default(size=size)
     except TypeError:
         font = ImageFont.load_default()
     _FONT_CACHE[key] = font
+    _FONT_UNICODE_SAFE_BY_ID[id(font)] = False
     return font
 
 
 def _safe_font_text(font: ImageFont.ImageFont, text: str) -> str:
     text = str(text or "")
-    if _font_can_encode(font, text):
+    if _FONT_UNICODE_SAFE_BY_ID.get(id(font), False):
         return text
     replacements = {"•": "-", "—": "-", "–": "-", "…": "..."}
     for src, dst in replacements.items():
         text = text.replace(src, dst)
+    # Último fallback: nunca deixar tofu; remove acentos quando o runtime não tem fonte Unicode.
     normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     return normalized or "?"
 
