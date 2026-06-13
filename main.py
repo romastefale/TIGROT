@@ -418,9 +418,20 @@ def render_image(path: Path, rev: bool) -> BytesIO:
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    """Fonte serifada para o mosaico visual.
+
+    A intenção visual é ficar próxima de Times New Roman. Em Linux/Termux,
+    Times nem sempre existe; por isso tentamos Liberation/DejaVu Serif antes
+    de cair para fontes sans ou default.
+    """
     candidates = [
+        "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/timesbd.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/times.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     ]
     for candidate in candidates:
         try:
@@ -445,6 +456,11 @@ def _draw_centered(
     x1, y1, x2, y2 = box
     tw, th = _text_size(draw, text, font)
     draw.text((x1 + (x2 - x1 - tw) / 2, y1 + (y2 - y1 - th) / 2), text, font=font, fill=fill)
+
+
+def _draw_double_rule(draw: ImageDraw.ImageDraw, x1: int, y: int, x2: int, color: tuple[int, int, int]) -> None:
+    draw.line((x1, y, x2, y), fill=color, width=1)
+    draw.line((x1, y + 6, x2, y + 6), fill=color, width=1)
 
 
 def _wrap_text(
@@ -486,7 +502,7 @@ def _mosaic_columns(n: int) -> int:
         return 1
     if n <= 3:
         return n
-    if n <= 9:
+    if n <= 6:
         return 3
     return 4
 
@@ -503,11 +519,12 @@ def _open_card_for_mosaic(card: Dict[str, Any], size: tuple[int, int]) -> Image.
         except Exception:
             logger.warning("MOSAIC_CARD_OPEN_FAILED | card=%s | path=%s", card.get("name"), path, exc_info=True)
 
-    placeholder = Image.new("RGB", size, (31, 25, 52))
+    placeholder = Image.new("RGB", size, (252, 250, 245))
     d = ImageDraw.Draw(placeholder)
-    d.rounded_rectangle((8, 8, size[0] - 8, size[1] - 8), radius=18, outline=(135, 106, 196), width=3)
-    font = _font(22, bold=True)
-    _draw_centered(d, (18, 18, size[0] - 18, size[1] - 18), "sem imagem", font, (244, 241, 255))
+    d.rectangle((10, 10, size[0] - 10, size[1] - 10), outline=(174, 155, 132), width=2)
+    d.rectangle((16, 16, size[0] - 16, size[1] - 16), outline=(211, 197, 177), width=1)
+    font = _font(28, bold=True)
+    _draw_centered(d, (24, 24, size[0] - 24, size[1] - 24), "sem imagem", font, (42, 33, 24))
     return placeholder
 
 
@@ -517,66 +534,111 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
 
     columns = _mosaic_columns(len(cards))
     rows = (len(cards) + columns - 1) // columns
-    margin = 44
+
+    # Layout claro e legível, inspirado nas molduras/linhas das próprias cartas.
+    margin = 36
     gap = 24
-    tile_w = 228
-    card_h = 330
-    label_h = 92
-    tile_h = card_h + label_h
-    header_h = 150
-    footer_h = 68
+    tile_w = 330
+    card_box_w = 292
+    card_box_h = 440
+    label_h = 138
+    tile_h = card_box_h + label_h + 72
+    header_h = 154
+    footer_h = 58
     width = margin * 2 + columns * tile_w + (columns - 1) * gap
     height = margin + header_h + rows * tile_h + (rows - 1) * gap + footer_h
 
-    bg = Image.new("RGB", (width, height), (11, 10, 26))
+    paper = (246, 241, 231)
+    paper_soft = (252, 250, 245)
+    ink = (42, 33, 24)
+    muted = (110, 98, 88)
+    rule = (174, 155, 132)
+    border = (217, 204, 184)
+    badge_fill = (235, 224, 198)
+    green = (63, 122, 77)
+    gold = (139, 107, 41)
+
+    bg = Image.new("RGB", (width, height), paper)
     draw = ImageDraw.Draw(bg)
-    title_font = _font(38, bold=True)
-    meta_font = _font(22, bold=True)
-    small_font = _font(18)
-    card_name_font = _font(18, bold=True)
-    pos_font = _font(16)
 
-    draw.rounded_rectangle((margin, margin, width - margin, margin + header_h - 18), radius=28, fill=(24, 20, 42))
+    kicker_font = _font(20)
+    title_font = _font(42, bold=True)
+    meta_font = _font(25, bold=True)
+    meta_regular_font = _font(24)
+    badge_font = _font(30, bold=True)
+    card_name_font = _font(31, bold=True)
+    pos_font = _font(25, bold=True)
+    footer_font = _font(20)
+
+    # Fundo externo com moldura de papel.
+    draw.rectangle((0, 0, width - 1, height - 1), outline=(205, 188, 165), width=2)
+
+    # Cabeçalho claro, sem linha compactada.
+    hx1, hy1 = margin, margin
+    hx2, hy2 = width - margin, margin + header_h
+    draw.rectangle((hx1, hy1, hx2, hy2), fill=paper_soft, outline=(216, 201, 179), width=1)
+    draw.text((hx1 + 26, hy1 + 18), "RESUMO VISUAL DA TIRAGEM", font=kicker_font, fill=muted)
     title = tiragem_name or "Tiragem manual"
-    draw.text((margin + 28, margin + 28), "Resumo visual da tiragem", font=title_font, fill=(244, 241, 255))
-    draw.text((margin + 30, margin + 84), f"{title} • {len(cards)} carta{'s' if len(cards) != 1 else ''}", font=meta_font, fill=(181, 140, 254))
+    title_lines = _wrap_text(draw, title, title_font, hx2 - hx1 - 52, max_lines=2)
+    ty = hy1 + 48
+    for line in title_lines:
+        draw.text((hx1 + 26, ty), line, font=title_font, fill=ink)
+        ty += 43
+    _draw_double_rule(draw, hx1 + 26, hy2 - 38, hx2 - 26, rule)
+    meta_y = hy2 - 26
+    meta = f"Tiragem: {title}    •    Quantidade: {len(cards)} carta{'s' if len(cards) != 1 else ''}"
+    meta_lines = _wrap_text(draw, meta, meta_regular_font, hx2 - hx1 - 52, max_lines=1)
+    draw.text((hx1 + 26, meta_y), meta_lines[0], font=meta_regular_font, fill=muted)
 
-    top = margin + header_h
+    top = margin + header_h + 26
     for idx, card in enumerate(cards):
         row = idx // columns
         col = idx % columns
         x = margin + col * (tile_w + gap)
         y = top + row * (tile_h + gap)
-        draw.rounded_rectangle((x, y, x + tile_w, y + tile_h), radius=24, fill=(22, 19, 39), outline=(62, 48, 91), width=2)
 
-        card_img = _open_card_for_mosaic(card, (tile_w - 28, card_h - 24))
+        # Card com duas molduras finas, similar às linhas das cartas.
+        draw.rectangle((x, y, x + tile_w, y + tile_h), fill=paper_soft, outline=border, width=1)
+        draw.rectangle((x + 8, y + 8, x + tile_w - 8, y + tile_h - 8), outline=(174, 155, 132), width=1)
+        draw.rectangle((x + 12, y + 12, x + tile_w - 12, y + tile_h - 12), outline=(211, 197, 177), width=1)
+
+        card_img = _open_card_for_mosaic(card, (card_box_w, card_box_h))
         ix = x + (tile_w - card_img.width) // 2
-        iy = y + 14
+        iy = y + 30 + max(0, (card_box_h - card_img.height) // 2)
+        draw.rectangle((ix - 2, iy - 2, ix + card_img.width + 1, iy + card_img.height + 1), fill=(255, 255, 255), outline=(226, 213, 194), width=1)
         bg.paste(card_img, (ix, iy))
 
-        badge = f"{idx + 1}"
-        draw.ellipse((x + 12, y + 12, x + 54, y + 54), fill=(181, 140, 254))
-        _draw_centered(draw, (x + 12, y + 12, x + 54, y + 54), badge, meta_font, (11, 10, 26))
+        # Badge discreto em tom de papel, sobreposto depois da imagem para não ficar cortado.
+        bx1, by1 = x + 18, y + 18
+        draw.ellipse((bx1, by1, bx1 + 44, by1 + 44), fill=badge_fill, outline=(201, 177, 143), width=1)
+        _draw_centered(draw, (bx1, by1, bx1 + 44, by1 + 44), str(idx + 1), badge_font, ink)
 
-        label_top = y + card_h
-        name_lines = _wrap_text(draw, str(card.get("name") or "—"), card_name_font, tile_w - 24, max_lines=2)
-        text_y = label_top + 10
+        label_top = y + 30 + card_box_h + 18
+        name_lines = _wrap_text(draw, str(card.get("name") or "—"), card_name_font, tile_w - 46, max_lines=2)
+        line_h = 34
+        text_block_h = max(1, len(name_lines)) * line_h
+        text_y = label_top + max(0, (70 - text_block_h) // 2)
         for line in name_lines:
             tw, _ = _text_size(draw, line, card_name_font)
-            draw.text((x + (tile_w - tw) / 2, text_y), line, font=card_name_font, fill=(244, 241, 255))
-            text_y += 22
-        pos = "invertida" if card.get("rev") else "normal"
-        pos_fill = (255, 199, 95) if card.get("rev") else (63, 224, 166)
-        tw, _ = _text_size(draw, pos, pos_font)
-        draw.text((x + (tile_w - tw) / 2, y + tile_h - 30), pos, font=pos_font, fill=pos_fill)
+            draw.text((x + (tile_w - tw) / 2, text_y), line, font=card_name_font, fill=ink)
+            text_y += line_h
 
-    footer_y = height - footer_h + 10
+        rule_y = label_top + 82
+        draw.line((x + 42, rule_y, x + tile_w - 42, rule_y), fill=rule, width=1)
+
+        pos = "invertida" if card.get("rev") else "normal"
+        pos_fill = gold if card.get("rev") else green
+        tw, _ = _text_size(draw, pos, pos_font)
+        draw.text((x + (tile_w - tw) / 2, rule_y + 18), pos, font=pos_font, fill=pos_fill)
+
     footer = "TIGROT • toque nesta imagem para voltar ao resumo da leitura"
-    tw, _ = _text_size(draw, footer, small_font)
-    draw.text(((width - tw) / 2, footer_y), footer, font=small_font, fill=(168, 163, 198))
+    tw, _ = _text_size(draw, footer, footer_font)
+    footer_y = height - footer_h + 18
+    draw.line((margin, footer_y - 14, width - margin, footer_y - 14), fill=(216, 201, 179), width=1)
+    draw.text(((width - tw) / 2, footer_y), footer, font=footer_font, fill=muted)
 
     out = BytesIO()
-    bg.save(out, "PNG")
+    bg.save(out, "PNG", optimize=True)
     out.seek(0)
     return out
 
