@@ -429,6 +429,13 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
     de cair para fontes sans ou default.
     """
     candidates = [
+        # Primeiro tente nomes de arquivo. O FreeType/Pillow pode procurar nas
+        # pastas de fontes do sistema Linux mesmo quando o caminho absoluto muda.
+        "DejaVuSerif-Bold.ttf" if bold else "DejaVuSerif.ttf",
+        "LiberationSerif-Bold.ttf" if bold else "LiberationSerif-Regular.ttf",
+        "Times_New_Roman_Bold.ttf" if bold else "Times_New_Roman.ttf",
+        "timesbd.ttf" if bold else "times.ttf",
+        # Depois tente caminhos absolutos comuns em Linux/Termux/Railway.
         "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
         "/usr/share/fonts/truetype/msttcorefonts/timesbd.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/times.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
@@ -549,7 +556,8 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
     tile_h = card_box_h + label_h + 72
     header_h = 118
     bottom_pad = 24
-    width = margin * 2 + columns * tile_w + (columns - 1) * gap
+    raw_width = margin * 2 + columns * tile_w + (columns - 1) * gap
+    width = max(960, raw_width)
     height = margin + header_h + rows * tile_h + (rows - 1) * gap + bottom_pad
 
     paper = (246, 241, 231)
