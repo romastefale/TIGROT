@@ -89,6 +89,10 @@ MIRA_WAIT_TIMEOUT = int(os.getenv("MIRA_WAIT_TIMEOUT", "600"))
 # receber (ou ver editada) a última parte, esperamos esse tanto sem novas
 # alterações antes de considerar a resposta completa.
 MIRA_SETTLE_SECONDS = float(os.getenv("MIRA_SETTLE_SECONDS", "8"))
+MOSAIC_JPEG_QUALITY = int(os.getenv("MOSAIC_JPEG_QUALITY", "84"))
+MOSAIC_SEND_WRITE_TIMEOUT = float(os.getenv("MOSAIC_SEND_WRITE_TIMEOUT", "90"))
+MOSAIC_SEND_READ_TIMEOUT = float(os.getenv("MOSAIC_SEND_READ_TIMEOUT", "90"))
+MOSAIC_SEND_CONNECT_TIMEOUT = float(os.getenv("MOSAIC_SEND_CONNECT_TIMEOUT", "20"))
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "3600"))
@@ -543,15 +547,14 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
     card_box_h = 440
     label_h = 138
     tile_h = card_box_h + label_h + 72
-    header_h = 154
-    footer_h = 58
+    header_h = 118
+    bottom_pad = 24
     width = margin * 2 + columns * tile_w + (columns - 1) * gap
-    height = margin + header_h + rows * tile_h + (rows - 1) * gap + footer_h
+    height = margin + header_h + rows * tile_h + (rows - 1) * gap + bottom_pad
 
     paper = (246, 241, 231)
     paper_soft = (252, 250, 245)
     ink = (42, 33, 24)
-    muted = (110, 98, 88)
     rule = (174, 155, 132)
     border = (217, 204, 184)
     badge_fill = (235, 224, 198)
@@ -561,40 +564,39 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
     bg = Image.new("RGB", (width, height), paper)
     draw = ImageDraw.Draw(bg)
 
-    kicker_font = _font(20)
-    title_font = _font(42, bold=True)
-    meta_font = _font(25, bold=True)
-    meta_regular_font = _font(24)
+    title_font = _font(40, bold=True)
     badge_font = _font(30, bold=True)
     card_name_font = _font(31, bold=True)
     pos_font = _font(25, bold=True)
-    footer_font = _font(20)
 
     # Fundo externo com moldura de papel.
     draw.rectangle((0, 0, width - 1, height - 1), outline=(205, 188, 165), width=2)
 
-    # Cabeçalho claro, sem linha compactada.
+    # Cabeçalho simples e centralizado.
     hx1, hy1 = margin, margin
     hx2, hy2 = width - margin, margin + header_h
     draw.rectangle((hx1, hy1, hx2, hy2), fill=paper_soft, outline=(216, 201, 179), width=1)
-    draw.text((hx1 + 26, hy1 + 18), "RESUMO VISUAL DA TIRAGEM", font=kicker_font, fill=muted)
     title = tiragem_name or "Tiragem manual"
-    title_lines = _wrap_text(draw, title, title_font, hx2 - hx1 - 52, max_lines=2)
-    ty = hy1 + 48
-    for line in title_lines:
-        draw.text((hx1 + 26, ty), line, font=title_font, fill=ink)
-        ty += 43
-    _draw_double_rule(draw, hx1 + 26, hy2 - 38, hx2 - 26, rule)
-    meta_y = hy2 - 26
-    meta = f"Tiragem: {title}    •    Quantidade: {len(cards)} carta{'s' if len(cards) != 1 else ''}"
-    meta_lines = _wrap_text(draw, meta, meta_regular_font, hx2 - hx1 - 52, max_lines=1)
-    draw.text((hx1 + 26, meta_y), meta_lines[0], font=meta_regular_font, fill=muted)
+    header_text = f"{title} • {len(cards)} carta{'s' if len(cards) != 1 else ''}"
+    header_lines = _wrap_text(draw, header_text, title_font, hx2 - hx1 - 54, max_lines=2)
+    line_height = 44
+    total_text_h = len(header_lines) * line_height
+    text_y = hy1 + ((header_h - total_text_h) // 2) - 2
+    for line in header_lines:
+        tw, _ = _text_size(draw, line, title_font)
+        draw.text((hx1 + (hx2 - hx1 - tw) / 2, text_y), line, font=title_font, fill=ink)
+        text_y += line_height
 
     top = margin + header_h + 26
     for idx, card in enumerate(cards):
         row = idx // columns
-        col = idx % columns
-        x = margin + col * (tile_w + gap)
+        row_start = row * columns
+        row_count = min(columns, len(cards) - row_start)
+        col_in_row = idx - row_start
+        row_width = row_count * tile_w + (row_count - 1) * gap
+        usable_width = width - margin * 2
+        x_start = margin + max(0, (usable_width - row_width) // 2)
+        x = x_start + col_in_row * (tile_w + gap)
         y = top + row * (tile_h + gap)
 
         # Card com duas molduras finas, similar às linhas das cartas.
@@ -608,40 +610,29 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
         draw.rectangle((ix - 2, iy - 2, ix + card_img.width + 1, iy + card_img.height + 1), fill=(255, 255, 255), outline=(226, 213, 194), width=1)
         bg.paste(card_img, (ix, iy))
 
-        # Badge discreto em tom de papel, sobreposto depois da imagem para não ficar cortado.
         bx1, by1 = x + 18, y + 18
         draw.ellipse((bx1, by1, bx1 + 44, by1 + 44), fill=badge_fill, outline=(201, 177, 143), width=1)
         _draw_centered(draw, (bx1, by1, bx1 + 44, by1 + 44), str(idx + 1), badge_font, ink)
 
-        label_top = y + 30 + card_box_h + 18
-        name_lines = _wrap_text(draw, str(card.get("name") or "—"), card_name_font, tile_w - 46, max_lines=2)
-        line_h = 34
-        text_block_h = max(1, len(name_lines)) * line_h
-        text_y = label_top + max(0, (70 - text_block_h) // 2)
+        label_top = y + 30 + card_box_h + 24
+        name_lines = _wrap_text(draw, str(card.get("name") or "—"), card_name_font, tile_w - 36, max_lines=2)
+        text_y = label_top
         for line in name_lines:
             tw, _ = _text_size(draw, line, card_name_font)
             draw.text((x + (tile_w - tw) / 2, text_y), line, font=card_name_font, fill=ink)
-            text_y += line_h
-
-        rule_y = label_top + 82
-        draw.line((x + 42, rule_y, x + tile_w - 42, rule_y), fill=rule, width=1)
-
+            text_y += 34
+        rule_y = y + tile_h - 66
+        draw.line((x + tile_w * 0.2, rule_y, x + tile_w * 0.8, rule_y), fill=rule, width=1)
         pos = "invertida" if card.get("rev") else "normal"
         pos_fill = gold if card.get("rev") else green
         tw, _ = _text_size(draw, pos, pos_font)
-        draw.text((x + (tile_w - tw) / 2, rule_y + 18), pos, font=pos_font, fill=pos_fill)
-
-    footer = "TIGROT • toque nesta imagem para voltar ao resumo da leitura"
-    tw, _ = _text_size(draw, footer, footer_font)
-    footer_y = height - footer_h + 18
-    draw.line((margin, footer_y - 14, width - margin, footer_y - 14), fill=(216, 201, 179), width=1)
-    draw.text(((width - tw) / 2, footer_y), footer, font=footer_font, fill=muted)
+        draw.text((x + (tile_w - tw) / 2, rule_y + 14), pos, font=pos_font, fill=pos_fill)
 
     out = BytesIO()
-    bg.save(out, "PNG", optimize=True)
+    quality = max(60, min(95, MOSAIC_JPEG_QUALITY))
+    bg.save(out, "JPEG", quality=quality, optimize=True, progressive=True)
     out.seek(0)
     return out
-
 
 def mosaic_caption(cards: List[Dict[str, Any]], tiragem_name: Optional[str]) -> str:
     title = html.escape(tiragem_name or "Tiragem manual")
@@ -661,11 +652,16 @@ async def send_tiragem_mosaic(
 ) -> Optional[int]:
     try:
         img = render_tiragem_mosaic(cards, tiragem_name)
+        mosaic_bytes = len(img.getbuffer())
+        logger.info("MOSAIC_READY | cards=%s | bytes=%s", len(cards), mosaic_bytes)
         sent = await ctx.bot.send_photo(
             chat_id=chat_id,
-            photo=InputFile(img, filename="tiragem-mosaico.png"),
+            photo=InputFile(img, filename="tiragem-mosaico.jpg"),
             caption=mosaic_caption(cards, tiragem_name),
             parse_mode="HTML",
+            connect_timeout=MOSAIC_SEND_CONNECT_TIMEOUT,
+            read_timeout=MOSAIC_SEND_READ_TIMEOUT,
+            write_timeout=MOSAIC_SEND_WRITE_TIMEOUT,
         )
         return sent.message_id
     except Exception:
