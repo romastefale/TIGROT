@@ -421,40 +421,146 @@ def render_image(path: Path, rev: bool) -> BytesIO:
         return b
 
 
-def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
-    """Fonte serifada para o mosaico visual.
+_FONT_CACHE: Dict[tuple[int, bool], ImageFont.ImageFont] = {}
+_FONT_SEARCH_CACHE: Optional[List[str]] = None
+_FONT_WARNED = False
+_FONT_PROBE_TEXT = "Carta do Dia / Sim ou Não • 13 cartas — Ás Três Ouros Paus A Imperatriz"
 
-    A intenção visual é ficar próxima de Times New Roman. Em Linux/Termux,
-    Times nem sempre existe; por isso tentamos Liberation/DejaVu Serif antes
-    de cair para fontes sans ou default.
-    """
-    candidates = [
-        # Primeiro tente nomes de arquivo. O FreeType/Pillow pode procurar nas
-        # pastas de fontes do sistema Linux mesmo quando o caminho absoluto muda.
-        "DejaVuSerif-Bold.ttf" if bold else "DejaVuSerif.ttf",
-        "LiberationSerif-Bold.ttf" if bold else "LiberationSerif-Regular.ttf",
+
+def _font_env_candidates(bold: bool) -> List[str]:
+    keys = ("MOSAIC_FONT_BOLD", "MOSAIC_FONT") if bold else ("MOSAIC_FONT_REGULAR", "MOSAIC_FONT")
+    return [os.getenv(k, "").strip() for k in keys if os.getenv(k, "").strip()]
+
+
+def _font_file_candidates() -> List[str]:
+    """Descobre fontes instaladas sem empacotar nenhum arquivo de fonte no ZIP."""
+    global _FONT_SEARCH_CACHE
+    if _FONT_SEARCH_CACHE is not None:
+        return _FONT_SEARCH_CACHE
+
+    roots = [
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+        Path("/app/.fonts"),
+        Path.home() / ".fonts",
+        Path.home() / ".local/share/fonts",
+    ]
+    files: List[str] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob("*"):
+                if path.suffix.lower() in {".ttf", ".otf", ".ttc"}:
+                    files.append(str(path))
+        except Exception:
+            continue
+
+    preferred_tokens = (
+        "times", "liberationserif", "dejavuserif", "notoserif", "freeserif",
+        "liberation", "dejavu", "noto", "freefont",
+    )
+
+    def score(path: str) -> tuple[int, str]:
+        name = Path(path).name.lower().replace("-", "").replace("_", "")
+        for i, token in enumerate(preferred_tokens):
+            if token in name:
+                return (i, name)
+        return (len(preferred_tokens), name)
+
+    _FONT_SEARCH_CACHE = sorted(files, key=score)
+    return _FONT_SEARCH_CACHE
+
+
+def _font_candidates(bold: bool) -> List[str]:
+    names = [
+        "Times New Roman Bold.ttf" if bold else "Times New Roman.ttf",
         "Times_New_Roman_Bold.ttf" if bold else "Times_New_Roman.ttf",
         "timesbd.ttf" if bold else "times.ttf",
-        # Depois tente caminhos absolutos comuns em Linux/Termux/Railway.
+        "LiberationSerif-Bold.ttf" if bold else "LiberationSerif-Regular.ttf",
+        "DejaVuSerif-Bold.ttf" if bold else "DejaVuSerif.ttf",
+        "NotoSerif-Bold.ttf" if bold else "NotoSerif-Regular.ttf",
+        "FreeSerifBold.ttf" if bold else "FreeSerif.ttf",
+    ]
+    paths = [
         "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
         "/usr/share/fonts/truetype/msttcorefonts/timesbd.ttf" if bold else "/usr/share/fonts/truetype/msttcorefonts/times.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
-    for candidate in candidates:
+    return _font_env_candidates(bold) + names + paths + _font_file_candidates()
+
+
+def _font_can_encode(font: ImageFont.ImageFont, text: str = _FONT_PROBE_TEXT) -> bool:
+    try:
+        font.getmask(text)
+        return True
+    except Exception:
+        return False
+
+
+def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    """Fonte serifada para o mosaico visual, com fallback Unicode seguro.
+
+    Não empacotamos fonte no projeto. O bot tenta fontes instaladas no ambiente
+    Railway/Linux, aceita override por MOSAIC_FONT/MOSAIC_FONT_REGULAR/
+    MOSAIC_FONT_BOLD e só cai no default do Pillow em último caso.
+    """
+    global _FONT_WARNED
+    key = (size, bold)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+
+    for candidate in _font_candidates(bold):
         try:
-            return ImageFont.truetype(candidate, size)
+            font = ImageFont.truetype(candidate, size)
+            if _font_can_encode(font):
+                _FONT_CACHE[key] = font
+                return font
         except Exception:
             continue
-    return ImageFont.load_default()
+
+    if not _FONT_WARNED:
+        logger.warning("MOSAIC_FONT_FALLBACK_DEFAULT | unicode_safe=false")
+        _FONT_WARNED = True
+    try:
+        font = ImageFont.load_default(size=size)
+    except TypeError:
+        font = ImageFont.load_default()
+    _FONT_CACHE[key] = font
+    return font
+
+
+def _safe_font_text(font: ImageFont.ImageFont, text: str) -> str:
+    text = str(text or "")
+    if _font_can_encode(font, text):
+        return text
+    replacements = {"•": "-", "—": "-", "–": "-", "…": "..."}
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return normalized or "?"
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
-    box = draw.textbbox((0, 0), text, font=font)
+    safe = _safe_font_text(font, text)
+    box = draw.textbbox((0, 0), safe, font=font)
     return box[2] - box[0], box[3] - box[1]
+
+
+def _draw_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[float, float],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+) -> None:
+    draw.text(xy, _safe_font_text(font, text), font=font, fill=fill)
 
 
 def _draw_centered(
@@ -466,7 +572,7 @@ def _draw_centered(
 ) -> None:
     x1, y1, x2, y2 = box
     tw, th = _text_size(draw, text, font)
-    draw.text((x1 + (x2 - x1 - tw) / 2, y1 + (y2 - y1 - th) / 2), text, font=font, fill=fill)
+    _draw_text(draw, (x1 + (x2 - x1 - tw) / 2, y1 + (y2 - y1 - th) / 2), text, font, fill)
 
 
 def _draw_double_rule(draw: ImageDraw.ImageDraw, x1: int, y: int, x2: int, color: tuple[int, int, int]) -> None:
@@ -592,7 +698,7 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
     text_y = hy1 + ((header_h - total_text_h) // 2) - 2
     for line in header_lines:
         tw, _ = _text_size(draw, line, title_font)
-        draw.text((hx1 + (hx2 - hx1 - tw) / 2, text_y), line, font=title_font, fill=ink)
+        _draw_text(draw, (hx1 + (hx2 - hx1 - tw) / 2, text_y), line, title_font, ink)
         text_y += line_height
 
     top = margin + header_h + 26
@@ -627,14 +733,14 @@ def render_tiragem_mosaic(cards: List[Dict[str, Any]], tiragem_name: Optional[st
         text_y = label_top
         for line in name_lines:
             tw, _ = _text_size(draw, line, card_name_font)
-            draw.text((x + (tile_w - tw) / 2, text_y), line, font=card_name_font, fill=ink)
+            _draw_text(draw, (x + (tile_w - tw) / 2, text_y), line, card_name_font, ink)
             text_y += 34
         rule_y = y + tile_h - 66
         draw.line((x + tile_w * 0.2, rule_y, x + tile_w * 0.8, rule_y), fill=rule, width=1)
         pos = "invertida" if card.get("rev") else "normal"
         pos_fill = gold if card.get("rev") else green
         tw, _ = _text_size(draw, pos, pos_font)
-        draw.text((x + (tile_w - tw) / 2, rule_y + 14), pos, font=pos_font, fill=pos_fill)
+        _draw_text(draw, (x + (tile_w - tw) / 2, rule_y + 14), pos, pos_font, pos_fill)
 
     out = BytesIO()
     quality = max(60, min(95, MOSAIC_JPEG_QUALITY))
