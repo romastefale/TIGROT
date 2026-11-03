@@ -3,7 +3,7 @@ import { LIMITE_TEXTO } from './config.js';
 
 export const escapar = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export function markdownParaHtml(texto) {
+function markdownParaHtml(texto) {
   return texto
     .replace(/\*\*\*(.+?)\*\*\*/g, '<b><i>$1</i></b>')
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
@@ -11,7 +11,7 @@ export function markdownParaHtml(texto) {
     .replace(/(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)/g, '<i>$1</i>');
 }
 
-export function prepararHtml(texto) {
+function prepararHtml(texto) {
   const normal = texto.replace(/<(\/?)tg-b>/g, '<$1b>').replace(/<(\/?)tg-i>/g, '<$1i>');
   return escapar(markdownParaHtml(normal)).replace(/&lt;(\/?)(b|i|u)&gt;/g, '<$1$2>');
 }

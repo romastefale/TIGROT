@@ -5,7 +5,7 @@ import { SESSAO_SEGUNDOS } from './config.js';
 
 export const agora = () => Math.floor(Date.now() / 1000);
 
-const vazia = (userId) => ({ userId, cartas: [], grupo: null, pagina: 0, pendente: null, atualizado: agora() });
+const vazia = (userId) => ({ userId, cartas: [], pendente: null, atualizado: agora() });
 
 export async function carregarSessao(userId) {
   const sessao = await db.select().from(sessoes).where(eq(sessoes.userId, userId)).get();
@@ -20,8 +20,6 @@ export async function salvarSessao(sessao) {
       target: sessoes.userId,
       set: {
         cartas: valores.cartas,
-        grupo: valores.grupo,
-        pagina: valores.pagina,
         pendente: valores.pendente,
         atualizado: valores.atualizado,
       },

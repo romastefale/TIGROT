@@ -100,8 +100,6 @@ export async function tratarCallback(consulta) {
       return;
     }
     await confirmar();
-    const sessao = await carregarSessao(userId);
-    await salvarSessao({ ...sessao, grupo, pagina: 0, pendente: null });
     await tela('Escolha:', menuCartas(grupo, 0));
     return;
   }
@@ -114,8 +112,6 @@ export async function tratarCallback(consulta) {
       return;
     }
     await confirmar();
-    const sessao = await carregarSessao(userId);
-    await salvarSessao({ ...sessao, grupo, pagina: numero });
     await tolerar(api.editMessageReplyMarkup({
       chat_id: chatId, message_id: mensagemId, reply_markup: menuCartas(grupo, numero),
     }));

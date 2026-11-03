@@ -3,8 +3,6 @@ import { table, integer, text, json, index, uniqueIndex } from 'sdk/db';
 export const sessoes = table('sessoes', {
   userId:     integer('user_id').primaryKey(),
   cartas:     json('cartas').notNull(),
-  grupo:      text('grupo'),
-  pagina:     integer('pagina').notNull().default(0),
   pendente:   text('pendente'),
   atualizado: integer('atualizado').notNull(),
 });
