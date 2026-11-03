@@ -7,4 +7,4 @@ export const LIMPEZA_SEGUNDOS = 86400;
 export const MAX_CARTAS = 12;
 export const CARTAS_POR_PAGINA = 8;
 export const LIMITE_TEXTO = 3800;
-export const URL_CARTAS = '';
+export const URL_CARTAS = 'https://app9007489375.tgcloud.ai/cartas/';
