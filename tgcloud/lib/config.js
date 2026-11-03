@@ -1,4 +1,3 @@
-export const GRUPO_ID = -5258446619;
 export const MIRA_PREFIXO = '@mira';
 export const MIRA_USUARIO = 'mira';
 export const ESPERA_SEGUNDOS = 600;
@@ -6,5 +5,4 @@ export const SESSAO_SEGUNDOS = 1800;
 export const LIMPEZA_SEGUNDOS = 86400;
 export const MAX_CARTAS = 12;
 export const CARTAS_POR_PAGINA = 8;
-export const LIMITE_TEXTO = 3800;
 export const URL_CARTAS = 'https://app9007489375.tgcloud.ai/cartas/';
