@@ -43,10 +43,9 @@ Não há variáveis de ambiente nem token no código: a Bot API é chamada pelo 
 
 1. No [@BotFather](https://t.me/BotFather): bot → **Serverless** → ligar. Em **CLI Access**, copie o *Access token* (`app<id>:<secret>`; não é o token da Bot API).
 2. No GitHub: Settings → Secrets and variables → Actions → secret **`TGCLOUD_TOKEN`** com esse valor.
-3. Desligue o serviço antigo (Railway ou Replit, que usavam `getUpdates`): o webhook do serverless e o `getUpdates` não funcionam ao mesmo tempo.
-4. O bot precisa estar no grupo e receber as mensagens da @mira. Isso já era requisito do bot antigo. O changelog da Bot API cita a *bot-to-bot communication*, que precisa estar ligada nos dois bots para um bot enviar mensagem a outro por username; não verifiquei se ela também governa o recebimento das mensagens da @mira no grupo.
-5. Merge na `main` (ou Actions → *Deploy* → Run workflow). O passo `push` imprime o endereço `https://app<id>.tgcloud.ai/`.
-6. Coloque esse endereço, terminado em `/cartas/`, em `URL_CARTAS` (`tgcloud/lib/config.js`) e faça o deploy de novo. Até lá o bot envia só o nome e a posição de cada carta.
+3. O bot precisa estar no grupo e receber as mensagens da @mira. Isso já era requisito do bot antigo. O changelog da Bot API cita a *bot-to-bot communication*, que precisa estar ligada nos dois bots para um bot enviar mensagem a outro por username; não verifiquei se ela também governa o recebimento das mensagens da @mira no grupo.
+4. Merge na `main` (ou Actions → *Deploy* → Run workflow). O passo `push` imprime o endereço `https://app<id>.tgcloud.ai/`.
+5. Coloque esse endereço, terminado em `/cartas/`, em `URL_CARTAS` (`tgcloud/lib/config.js`) e faça o deploy de novo. Até lá o bot envia só o nome e a posição de cada carta.
 
 ## Desenvolvimento
 
