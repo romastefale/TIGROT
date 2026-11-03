@@ -1,0 +1,69 @@
+name: Deploy (Telegram Serverless)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tgcloud/**"
+      - "web/**"
+      - "tgcloud.jsonc"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      migrate_mode:
+        description: "Migração do banco: safe (só mudanças aditivas) ou dry-run (só mostra)."
+        type: choice
+        options: [safe, dry-run]
+        default: safe
+
+concurrency:
+  group: tgcloud-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TGCLOUD_TOKEN: ${{ secrets.TGCLOUD_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verificar secret
+        run: |
+          if [ -z "$TGCLOUD_TOKEN" ]; then
+            echo "::error::Defina o secret TGCLOUD_TOKEN (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Sincronizar estado da nuvem
+        run: npm run fetch
+
+      - name: Mudanças a publicar
+        run: npm run status
+
+      - name: Publicar módulos e cartas
+        run: npm run deploy
+
+      - name: Migrar banco
+        run: |
+          mode="${{ github.event.inputs.migrate_mode || 'safe' }}"
+          case "$mode" in
+            dry-run)  npm run migrate -- --dry-run ;;
+            *)        npm run migrate -- --safe ;;
+          esac
+
+      - name: Estado do webhook
+        run: npm run webhook

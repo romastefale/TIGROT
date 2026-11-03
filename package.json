@@ -1,0 +1,19 @@
+{
+  "name": "tigrot",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "0.2.0"
+  },
+  "scripts": {
+    "deploy": "tgcloud push",
+    "status": "tgcloud status",
+    "run": "tgcloud run",
+    "fetch": "tgcloud fetch",
+    "migrate": "tgcloud migrate",
+    "webhook": "tgcloud webhook",
+    "cartas": "node scripts/cartas/gerar.mjs"
+  }
+}

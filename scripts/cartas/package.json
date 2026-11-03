@@ -1,0 +1,8 @@
+{
+  "name": "tigrot-cartas",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "sharp": "0.34.5"
+  }
+}
