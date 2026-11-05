@@ -1,6 +1,6 @@
 # TIGROT — Bot de Tarô
 
-Bot de Telegram 100% **Telegram Serverless**: o código roda nos módulos JavaScript de `tgcloud/`, na infraestrutura do Telegram, sem servidor próprio. Sorteia ou recebe cartas do baralho Rider-Waite-Smith (78 cartas) e, em vez de chamar uma LLM, pede a interpretação ao bot **@mira** no grupo `-5258446619`. A resposta da @mira é repassada ao usuário no chat original.
+Bot de Telegram 100% **Telegram Serverless**: o código roda nos módulos JavaScript de `tgcloud/`, na infraestrutura do Telegram, sem servidor próprio. Sorteia ou recebe cartas do baralho Rider-Waite-Smith (78 cartas) e, em vez de chamar uma LLM, pede a interpretação ao bot **@mira** no grupo privado configurado no deploy. A resposta da @mira é repassada ao usuário no chat original.
 
 Para cada tiragem o bot pede DUAS leituras à @mira, uma depois da outra:
 
