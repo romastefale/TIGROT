@@ -52,15 +52,18 @@ jobs:
 
       - name: Handler message carrega e responde na plataforma (chat falso)
         continue-on-error: true
-        run: npm run run -- handlers/message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "/buscar torre" }'
+        run: |
+          npm run run -- handlers/message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "/buscar torre" }'
 
       - name: Handler callback_query carrega e responde na plataforma (dados falsos)
         continue-on-error: true
-        run: npm run run -- handlers/callback_query '{ id: "x", from: { id: 1 }, data: "zzz", message: { chat: { id: 1 }, message_id: 1 } }'
+        run: |
+          npm run run -- handlers/callback_query '{ id: "x", from: { id: 1 }, data: "zzz", message: { chat: { id: 1 }, message_id: 1 } }'
 
       - name: Handler edited_message carrega e responde na plataforma (chat falso)
         continue-on-error: true
-        run: npm run run -- handlers/edited_message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "x" }'
+        run: |
+          npm run run -- handlers/edited_message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "x" }'
 
       - name: Estado das leituras e do bot no grupo (sem ids, títulos nem textos)
         run: |
