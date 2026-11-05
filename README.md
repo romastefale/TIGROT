@@ -48,7 +48,7 @@ Não há como repetir um envio depois de uma espera, porque o serverless não te
 
 Não há variáveis de ambiente nem token no código: a Bot API é chamada pelo `api` do SDK. Os valores ficam em `tgcloud/lib/config.js`, e o id do grupo vem do secret `GROUP` do GitHub Actions (abaixo). O valor do `GROUP` nunca é impresso: o bot não o escreve em log nem em mensagem, e o workflow só o lê como secret (o Actions o mascara).
 
-- `GRUPO_ID`, em `tgcloud/lib/grupo.js`: grupo privado onde está a @mira. O arquivo guardado no repositório traz `0` (não configurado). A cada deploy, se o secret `GROUP` for um id negativo, com o sinal (por exemplo `-1001234567890`), o workflow reescreve o arquivo com ele; se faltar ou vier fora desse formato, o deploy continua com `0` e mostra um aviso.
+- `GRUPO_ID`, em `tgcloud/lib/grupo.js`: grupo privado onde está a @mira. O arquivo guardado no repositório traz `0` (não configurado). A cada deploy o workflow lê o secret `GROUP`, tira espaços das pontas e exige um id negativo, com o sinal e sem zeros à esquerda (por exemplo `-1001234567890`); então reescreve o arquivo. Se o secret estiver vazio ou fora desse formato, o deploy para e informa só a causa (sem mostrar o valor), para não apagar o grupo que já estava publicado.
 - `MIRA_PREFIXO` (`@mira`) e `MIRA_USUARIO` (`mira`, sem `@`, sem diferenciar maiúsculas).
 - `ESPERA_SEGUNDOS` (600), `SESSAO_SEGUNDOS` (1800), `LIMPEZA_SEGUNDOS` (86400, quando leituras antigas são apagadas).
 - `MAX_CARTAS` (12) e `CARTAS_POR_PAGINA` (8) na seleção manual.

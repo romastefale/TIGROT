@@ -55,11 +55,25 @@ jobs:
         env:
           GROUP: ${{ secrets.GROUP }}
         run: |
-          if printf '%s' "$GROUP" | grep -Eq '^-[1-9][0-9]{0,14}$'; then
-            printf 'export const GRUPO_ID = %s;\n' "$GROUP" > tgcloud/lib/grupo.js
-          else
-            echo "::warning::O secret GROUP está ausente ou fora do formato (id do grupo, negativo, com o sinal). O bot sobe sem grupo e avisa quem pedir uma leitura."
+          valor="${GROUP#"${GROUP%%[![:space:]]*}"}"
+          valor="${valor%"${valor##*[![:space:]]}"}"
+          motivo=""
+          if [ -z "$valor" ]; then
+            motivo="o secret está vazio ou não existe"
+          elif ! [[ "$valor" =~ ^-?[0-9]+$ ]]; then
+            motivo="há caracteres que não são dígitos, ou o sinal de menos não está no começo"
+          elif ! [[ "$valor" =~ ^- ]]; then
+            motivo="falta o sinal de menos no começo"
+          elif ! [[ "$valor" =~ ^-[1-9] ]]; then
+            motivo="o número começa com zero"
+          elif ! [[ "$valor" =~ ^-[0-9]{1,15}$ ]]; then
+            motivo="o número tem mais de 15 dígitos"
           fi
+          if [ -n "$motivo" ]; then
+            echo "::error::GROUP inválido: $motivo. O deploy foi interrompido para não apagar o grupo já configurado."
+            exit 1
+          fi
+          printf 'export const GRUPO_ID = %s;\n' "$valor" > tgcloud/lib/grupo.js
 
       - name: Mudanças a publicar
         run: npm run status
