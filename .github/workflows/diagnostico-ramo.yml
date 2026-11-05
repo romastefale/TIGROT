@@ -1,0 +1,164 @@
+name: Diagnóstico da branch (somente leitura)
+
+on:
+  push:
+    branches: [claude/tigrot-telegram-serverless-bnupfi]
+    paths:
+      - ".github/workflows/diagnostico-ramo.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TGCLOUD_TOKEN: ${{ secrets.TGCLOUD_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run fetch
+
+      - name: Estado do webhook
+        run: npm run webhook
+
+      - name: Gravar o grupo da Mira
+        env:
+          GROUP: ${{ secrets.GROUP }}
+        run: |
+          valor="${GROUP#"${GROUP%%[![:space:]]*}"}"
+          valor="${valor%"${valor##*[![:space:]]}"}"
+          valor="${valor#-}"
+          motivo=""
+          if [ -z "$valor" ]; then
+            motivo="o secret está vazio ou não existe"
+          elif ! [[ "$valor" =~ ^[0-9]+$ ]]; then
+            motivo="há caracteres que não são dígitos"
+          elif ! [[ "$valor" =~ ^[1-9] ]]; then
+            motivo="o número começa com zero"
+          elif ! [[ "$valor" =~ ^[0-9]{1,15}$ ]]; then
+            motivo="o número tem mais de 15 dígitos"
+          fi
+          if [ -n "$motivo" ]; then
+            echo "::error::GROUP inválido: $motivo. O deploy foi interrompido para não apagar o grupo já configurado."
+            exit 1
+          fi
+          printf 'export const GRUPO_ID = -%s;\n' "$valor" > tgcloud/lib/grupo.js
+
+      - name: Handler message carrega e responde na plataforma (chat falso)
+        continue-on-error: true
+        run: |
+          npm run run -- handlers/message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "/buscar torre" }'
+
+      - name: Handler callback_query carrega e responde na plataforma (dados falsos)
+        continue-on-error: true
+        run: |
+          npm run run -- handlers/callback_query '{ id: "x", from: { id: 1 }, data: "zzz", message: { chat: { id: 1 }, message_id: 1 } }'
+
+      - name: Handler edited_message carrega e responde na plataforma (chat falso)
+        continue-on-error: true
+        run: |
+          npm run run -- handlers/edited_message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "x" }'
+
+      - name: Estado das leituras e do bot no grupo (sem ids, títulos nem textos)
+        run: |
+          mkdir -p tgcloud/endpoints
+          cat > tgcloud/endpoints/diagnostico.js <<'EOF'
+          import { api, db, BotApiError } from 'sdk';
+          import { leituras, partes, vistos } from '../schema.js';
+          import { GRUPO_ID } from '../lib/grupo.js';
+          import { MIRA_USUARIO } from '../lib/config.js';
+
+          async function tentar(chamada) {
+            try {
+              return { ok: true, valor: await chamada() };
+            } catch (e) {
+              return { ok: false, erro: e instanceof BotApiError ? `erro ${e.code}` : String((e && e.message) || e) };
+            }
+          }
+
+          export default async function () {
+            const agora = Math.floor(Date.now() / 1000);
+            const todas = await db.select().from(leituras).all();
+            const respostas = await db.select().from(partes).all();
+            const porLeitura = new Map();
+            for (const parte of respostas) {
+              const atual = porLeitura.get(parte.leituraId) || { partes: 0, entregues: 0 };
+              atual.partes += 1;
+              if (Array.isArray(parte.entregues) && parte.entregues.length) atual.entregues += 1;
+              porLeitura.set(parte.leituraId, atual);
+            }
+            const totais = {};
+            for (const leitura of todas) {
+              const chave = `${leitura.tipo}:${leitura.estado}`;
+              totais[chave] = (totais[chave] || 0) + 1;
+            }
+            const recentes = todas
+              .map((leitura) => ({
+                tipo: leitura.tipo,
+                estado: leitura.estado,
+                idadeSegundos: agora - leitura.criada,
+                partesDaMira: (porLeitura.get(leitura.id) || { partes: 0 }).partes,
+                partesEntreguesAoUsuario: (porLeitura.get(leitura.id) || { entregues: 0 }).entregues,
+              }))
+              .sort((a, b) => a.idadeSegundos - b.idadeSegundos)
+              .slice(0, 12);
+
+            const eu = await api.getMe();
+            const grupo = { configurado: Boolean(GRUPO_ID) };
+            let idDaMira = null;
+            if (GRUPO_ID) {
+              const chat = await tentar(() => api.getChat({ chat_id: GRUPO_ID }));
+              const membro = await tentar(() => api.getChatMember({ chat_id: GRUPO_ID, user_id: eu.id }));
+              const admins = await tentar(() => api.getChatAdministrators({ chat_id: GRUPO_ID }));
+              const lista = admins.ok ? admins.valor : [];
+              const bots = lista.filter((a) => a.user && a.user.is_bot);
+              grupo.tipoDoChat = chat.ok ? chat.valor.type : chat.erro;
+              grupo.botNoGrupo = membro.ok ? membro.valor.status : membro.erro;
+              grupo.administradores = admins.ok ? { humanos: lista.length - bots.length, bots: bots.map((a) => a.user.username || '(sem usuário)') } : admins.erro;
+              grupo.miraEntreOsAdministradores = lista.some((a) => a.user && String(a.user.username || '').toLowerCase() === MIRA_USUARIO);
+              const total = await tentar(() => api.getChatMemberCount({ chat_id: GRUPO_ID }));
+              grupo.totalDeMembros = total.ok ? total.valor : total.erro;
+              const mira = await tentar(() => api.getChat({ chat_id: `@${MIRA_USUARIO}` }));
+              grupo.mira = { usuarioEncontrado: mira.ok, resultado: mira.ok ? mira.valor.type : mira.erro };
+              idDaMira = mira.ok ? mira.valor.id : null;
+              if (mira.ok && mira.valor.id) {
+                const naMira = await tentar(() => api.getChatMember({ chat_id: GRUPO_ID, user_id: mira.valor.id }));
+                grupo.mira.statusNoGrupo = naMira.ok ? naMira.valor.status : naMira.erro;
+                grupo.mira.ehBot = naMira.ok ? Boolean(naMira.valor.user && naMira.valor.user.is_bot) : undefined;
+              }
+            }
+            const lidos = await db.select().from(vistos).all();
+            const mensagensVistas = lidos
+              .map((v) => ({
+                idadeSegundos: agora - v.quando,
+                via: v.via,
+                deBot: v.ehBot,
+                usuarioDoBot: v.usuario,
+                eAMira: idDaMira !== null && v.remetenteId === idDaMira,
+                temTexto: v.temTexto,
+                eResposta: v.eResposta,
+                casouNoFiltro: v.casouComMira,
+              }))
+              .sort((a, b) => a.idadeSegundos - b.idadeSegundos)
+              .slice(0, 12);
+            return {
+              mensagensVistasNoGrupo: mensagensVistas,
+              bot: { usuario: eu.username, leTodasAsMensagensDeGrupo: eu.can_read_all_group_messages },
+              grupo,
+              totalDeLeituras: todas.length,
+              totalDePartes: respostas.length,
+              totais,
+              recentes,
+            };
+          }
+          EOF
+          npm run run -- endpoints/diagnostico '{}' --ctx '{ initData: { user: { id: 1 } } }'
