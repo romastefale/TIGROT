@@ -51,6 +51,16 @@ jobs:
       - name: Sincronizar estado da nuvem
         run: npm run fetch
 
+      - name: Gravar o grupo da Mira
+        env:
+          GROUP: ${{ vars.GROUP || secrets.GROUP }}
+        run: |
+          if ! printf '%s' "$GROUP" | grep -Eq '^-?[0-9]+$'; then
+            echo "::error::Defina GROUP (Settings → Secrets and variables → Actions) com o id do grupo, com o sinal, por exemplo -1001234567890."
+            exit 1
+          fi
+          printf 'export const GRUPO_ID = %s;\n' "$GROUP" > tgcloud/lib/grupo.js
+
       - name: Mudanças a publicar
         run: npm run status
 

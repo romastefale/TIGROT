@@ -1,4 +1,4 @@
-import { api, BotApiError } from 'sdk';
+import { api } from 'sdk';
 import { enviarCartas } from './fotos.js';
 import { perguntar } from './ponte.js';
 
@@ -8,8 +8,7 @@ export async function iniciarLeitura(chatId, cartas, tiragem) {
   try {
     await perguntar(chatId, 'tecnica', cartas, tiragem);
   } catch (e) {
-    if (!(e instanceof BotApiError)) throw e;
-    console.error('pedido da leitura técnica recusado:', e.code, e.description);
+    console.error('pedido da leitura técnica falhou:', (e && e.description) || (e && e.message) || String(e));
     await api.sendMessage({ chat_id: chatId, text: '⚠️ Não consegui enviar o pedido de leitura à Mira.' });
   }
 }
