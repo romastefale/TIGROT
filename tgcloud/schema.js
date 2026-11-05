@@ -1,4 +1,4 @@
-import { table, integer, text, json, index, uniqueIndex } from 'sdk/db';
+import { table, integer, text, boolean, json, index, uniqueIndex } from 'sdk/db';
 
 export const sessoes = table('sessoes', {
   userId:     integer('user_id').primaryKey(),
@@ -29,6 +29,18 @@ export const partes = table('partes', {
 }, (t) => ({
   leituraIdx: index('idx_partes_leitura').on(t.leituraId),
 }));
+
+export const vistos = table('vistos', {
+  id:          integer('id').primaryKey({ autoIncrement: true }),
+  quando:      integer('quando').notNull(),
+  via:         text('via').notNull(),
+  ehBot:       boolean('eh_bot').notNull(),
+  remetenteId: integer('remetente_id'),
+  usuario:     text('usuario'),
+  temTexto:    boolean('tem_texto').notNull(),
+  eResposta:   boolean('e_resposta').notNull(),
+  casouComMira: boolean('casou_com_mira').notNull(),
+});
 
 export const fotos = table('fotos', {
   chave:   text('chave').primaryKey(),

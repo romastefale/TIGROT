@@ -55,7 +55,7 @@ jobs:
           mkdir -p tgcloud/endpoints
           cat > tgcloud/endpoints/diagnostico.js <<'EOF'
           import { api, db, BotApiError } from 'sdk';
-          import { leituras, partes } from '../schema.js';
+          import { leituras, partes, vistos } from '../schema.js';
           import { GRUPO_ID } from '../lib/grupo.js';
           import { MIRA_USUARIO } from '../lib/config.js';
 
@@ -96,6 +96,7 @@ jobs:
 
             const eu = await api.getMe();
             const grupo = { configurado: Boolean(GRUPO_ID) };
+            let idDaMira = null;
             if (GRUPO_ID) {
               const chat = await tentar(() => api.getChat({ chat_id: GRUPO_ID }));
               const membro = await tentar(() => api.getChatMember({ chat_id: GRUPO_ID, user_id: eu.id }));
@@ -110,13 +111,29 @@ jobs:
               grupo.totalDeMembros = total.ok ? total.valor : total.erro;
               const mira = await tentar(() => api.getChat({ chat_id: `@${MIRA_USUARIO}` }));
               grupo.mira = { usuarioEncontrado: mira.ok, resultado: mira.ok ? mira.valor.type : mira.erro };
+              idDaMira = mira.ok ? mira.valor.id : null;
               if (mira.ok && mira.valor.id) {
                 const naMira = await tentar(() => api.getChatMember({ chat_id: GRUPO_ID, user_id: mira.valor.id }));
                 grupo.mira.statusNoGrupo = naMira.ok ? naMira.valor.status : naMira.erro;
                 grupo.mira.ehBot = naMira.ok ? Boolean(naMira.valor.user && naMira.valor.user.is_bot) : undefined;
               }
             }
+            const lidos = await db.select().from(vistos).all();
+            const mensagensVistas = lidos
+              .map((v) => ({
+                idadeSegundos: agora - v.quando,
+                via: v.via,
+                deBot: v.ehBot,
+                usuarioDoBot: v.usuario,
+                eAMira: idDaMira !== null && v.remetenteId === idDaMira,
+                temTexto: v.temTexto,
+                eResposta: v.eResposta,
+                casouNoFiltro: v.casouComMira,
+              }))
+              .sort((a, b) => a.idadeSegundos - b.idadeSegundos)
+              .slice(0, 12);
             return {
+              mensagensVistasNoGrupo: mensagensVistas,
               bot: { usuario: eu.username, leTodasAsMensagensDeGrupo: eu.can_read_all_group_messages },
               grupo,
               totalDeLeituras: todas.length,

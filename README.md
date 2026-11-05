@@ -36,6 +36,10 @@ Se o grupo virar supergrupo, o id muda: o Telegram passa a recusar o antigo (err
 
 Não há como repetir um envio depois de uma espera, porque o serverless não tem temporizador. Por isso o bot não tenta de novo sozinho: avisa o usuário, que pode pedir a tiragem outra vez.
 
+## Registro do que chega no grupo
+
+Para saber se as mensagens da @mira chegam ao bot, cada mensagem ou edição vinda do grupo configurado grava uma linha em `vistos` (as 50 mais recentes): quando, se veio de bot, o id e o usuário do remetente só quando é bot, se tem texto, se é resposta e se casou com o filtro da @mira. Não guarda texto nem dados de pessoas. Se a gravação falhar, o bot segue normalmente. O workflow manual "Diagnóstico (somente leitura)" mostra esse registro, as leituras e o estado do bot e da @mira no grupo, sem ids, títulos nem textos.
+
 ## Comandos
 
 - `/start`: boas-vindas e menu de grupos de cartas.
@@ -79,7 +83,7 @@ npm run cartas
 
 ## Estrutura
 
-- `tgcloud/schema.js`: tabelas `sessoes`, `leituras`, `partes` e `fotos`.
+- `tgcloud/schema.js`: tabelas `sessoes`, `leituras`, `partes`, `vistos` e `fotos`.
 - `tgcloud/handlers/`: `message`, `edited_message` e `callback_query`.
 - `tgcloud/lib/`: cartas e tiragens, teclados, comandos, callbacks, ponte com a @mira, fotos e formatação de texto.
 - `web/cartas/`: 156 imagens (78 cartas, normal e invertida), geradas por `scripts/cartas/gerar.mjs`.
