@@ -1,0 +1,66 @@
+name: Diagnóstico (somente leitura)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TGCLOUD_TOKEN: ${{ secrets.TGCLOUD_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run fetch
+
+      - name: Estado do webhook
+        run: npm run webhook
+
+      - name: Estado das leituras (só contagens, estados e idades)
+        run: |
+          mkdir -p tgcloud/endpoints
+          cat > tgcloud/endpoints/diagnostico.js <<'EOF'
+          import { db } from 'sdk';
+          import { leituras, partes } from '../schema.js';
+
+          export default async function () {
+            const agora = Math.floor(Date.now() / 1000);
+            const todas = await db.select().from(leituras).all();
+            const respostas = await db.select().from(partes).all();
+            const porLeitura = new Map();
+            for (const parte of respostas) {
+              const atual = porLeitura.get(parte.leituraId) || { partes: 0, entregues: 0 };
+              atual.partes += 1;
+              if (Array.isArray(parte.entregues) && parte.entregues.length) atual.entregues += 1;
+              porLeitura.set(parte.leituraId, atual);
+            }
+            const totais = {};
+            for (const leitura of todas) {
+              const chave = `${leitura.tipo}:${leitura.estado}`;
+              totais[chave] = (totais[chave] || 0) + 1;
+            }
+            const recentes = todas
+              .map((leitura) => ({
+                tipo: leitura.tipo,
+                estado: leitura.estado,
+                idadeSegundos: agora - leitura.criada,
+                partesDaMira: (porLeitura.get(leitura.id) || { partes: 0 }).partes,
+                partesEntreguesAoUsuario: (porLeitura.get(leitura.id) || { entregues: 0 }).entregues,
+              }))
+              .sort((a, b) => a.idadeSegundos - b.idadeSegundos)
+              .slice(0, 12);
+            return { totalDeLeituras: todas.length, totalDePartes: respostas.length, totais, recentes };
+          }
+          EOF
+          npm run run -- endpoints/diagnostico '{}' --ctx '{ initData: { user: { id: 1 } } }'
