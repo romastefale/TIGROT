@@ -27,12 +27,45 @@ jobs:
       - name: Estado do webhook
         run: npm run webhook
 
-      - name: Estado das leituras (só contagens, estados e idades)
+      - name: Gravar o grupo da Mira
+        env:
+          GROUP: ${{ secrets.GROUP }}
+        run: |
+          valor="${GROUP#"${GROUP%%[![:space:]]*}"}"
+          valor="${valor%"${valor##*[![:space:]]}"}"
+          valor="${valor#-}"
+          motivo=""
+          if [ -z "$valor" ]; then
+            motivo="o secret está vazio ou não existe"
+          elif ! [[ "$valor" =~ ^[0-9]+$ ]]; then
+            motivo="há caracteres que não são dígitos"
+          elif ! [[ "$valor" =~ ^[1-9] ]]; then
+            motivo="o número começa com zero"
+          elif ! [[ "$valor" =~ ^[0-9]{1,15}$ ]]; then
+            motivo="o número tem mais de 15 dígitos"
+          fi
+          if [ -n "$motivo" ]; then
+            echo "::error::GROUP inválido: $motivo. O deploy foi interrompido para não apagar o grupo já configurado."
+            exit 1
+          fi
+          printf 'export const GRUPO_ID = -%s;\n' "$valor" > tgcloud/lib/grupo.js
+
+      - name: Estado das leituras e do bot no grupo (sem ids, títulos nem textos)
         run: |
           mkdir -p tgcloud/endpoints
           cat > tgcloud/endpoints/diagnostico.js <<'EOF'
-          import { db } from 'sdk';
+          import { api, db, BotApiError } from 'sdk';
           import { leituras, partes } from '../schema.js';
+          import { GRUPO_ID } from '../lib/grupo.js';
+          import { MIRA_USUARIO } from '../lib/config.js';
+
+          async function tentar(chamada) {
+            try {
+              return { ok: true, valor: await chamada() };
+            } catch (e) {
+              return { ok: false, erro: e instanceof BotApiError ? `erro ${e.code}` : String((e && e.message) || e) };
+            }
+          }
 
           export default async function () {
             const agora = Math.floor(Date.now() / 1000);
@@ -60,7 +93,28 @@ jobs:
               }))
               .sort((a, b) => a.idadeSegundos - b.idadeSegundos)
               .slice(0, 12);
-            return { totalDeLeituras: todas.length, totalDePartes: respostas.length, totais, recentes };
+
+            const eu = await api.getMe();
+            const grupo = { configurado: Boolean(GRUPO_ID) };
+            if (GRUPO_ID) {
+              const chat = await tentar(() => api.getChat({ chat_id: GRUPO_ID }));
+              const membro = await tentar(() => api.getChatMember({ chat_id: GRUPO_ID, user_id: eu.id }));
+              const admins = await tentar(() => api.getChatAdministrators({ chat_id: GRUPO_ID }));
+              const lista = admins.ok ? admins.valor : [];
+              const bots = lista.filter((a) => a.user && a.user.is_bot);
+              grupo.tipoDoChat = chat.ok ? chat.valor.type : chat.erro;
+              grupo.botNoGrupo = membro.ok ? membro.valor.status : membro.erro;
+              grupo.administradores = admins.ok ? { humanos: lista.length - bots.length, bots: bots.map((a) => a.user.username || '(sem usuário)') } : admins.erro;
+              grupo.miraEntreOsAdministradores = lista.some((a) => a.user && String(a.user.username || '').toLowerCase() === MIRA_USUARIO);
+            }
+            return {
+              bot: { usuario: eu.username, leTodasAsMensagensDeGrupo: eu.can_read_all_group_messages },
+              grupo,
+              totalDeLeituras: todas.length,
+              totalDePartes: respostas.length,
+              totais,
+              recentes,
+            };
           }
           EOF
           npm run run -- endpoints/diagnostico '{}' --ctx '{ initData: { user: { id: 1 } } }'
