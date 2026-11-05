@@ -78,8 +78,7 @@ export async function tratarCallback(consulta) {
       chat_id: chatId,
       text: `🎴 <b>${escapar(info.nome)}</b>\n\n`
         + `📌 Tiragem selecionada: <b>${escapar(info.label)}</b>\n`
-        + `🃏 Cartas sorteadas: <b>${info.count}</b>\n`
-        + '🔎 Agora a leitura será enviada em partes.',
+        + `🃏 Cartas sorteadas: <b>${info.count}</b>`,
       parse_mode: 'HTML',
     });
     await iniciarLeitura(chatId, cartas, info.nome);

@@ -53,13 +53,13 @@ jobs:
 
       - name: Gravar o grupo da Mira
         env:
-          GROUP: ${{ vars.GROUP || secrets.GROUP }}
+          GROUP: ${{ secrets.GROUP }}
         run: |
-          if ! printf '%s' "$GROUP" | grep -Eq '^-?[0-9]+$'; then
-            echo "::error::Defina GROUP (Settings → Secrets and variables → Actions) com o id do grupo, com o sinal, por exemplo -1001234567890."
-            exit 1
+          if printf '%s' "$GROUP" | grep -Eq '^-[1-9][0-9]{0,14}$'; then
+            printf 'export const GRUPO_ID = %s;\n' "$GROUP" > tgcloud/lib/grupo.js
+          else
+            echo "::warning::O secret GROUP está ausente ou fora do formato (id do grupo, negativo, com o sinal). O bot sobe sem grupo e avisa quem pedir uma leitura."
           fi
-          printf 'export const GRUPO_ID = %s;\n' "$GROUP" > tgcloud/lib/grupo.js
 
       - name: Mudanças a publicar
         run: npm run status

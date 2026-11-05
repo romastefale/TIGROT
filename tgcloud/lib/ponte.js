@@ -3,6 +3,7 @@ import { and, asc, eq, gt, inArray, lt, sql } from 'sdk/db';
 import { leituras, partes } from '../schema.js';
 import { ESPERA_SEGUNDOS, LIMPEZA_SEGUNDOS, MIRA_PREFIXO, MIRA_USUARIO } from './config.js';
 import { GRUPO_ID } from './grupo.js';
+import { ehGrupo, grupoAtual, registrarMigracao } from './destino.js';
 import { posicao } from './cartas.js';
 import { agora } from './sessao.js';
 import { dividir, editarTexto, enviarTexto } from './texto.js';
@@ -41,30 +42,64 @@ const PEDIDOS = {
   ),
 };
 
+async function enviarAoGrupo(texto) {
+  const pedido = (chat_id) => ({ chat_id, text: texto, link_preview_options: { is_disabled: true } });
+  try {
+    return await api.sendMessage(pedido(await grupoAtual()));
+  } catch (e) {
+    const novoId = e instanceof BotApiError && e.parameters && e.parameters.migrate_to_chat_id;
+    if (!novoId) throw e;
+    await registrarMigracao(novoId);
+    return api.sendMessage(pedido(novoId));
+  }
+}
+
 export async function perguntar(chatId, tipo, cartas, tiragem) {
-  if (!GRUPO_ID) throw new Error('grupo da Mira não configurado (variável GROUP do deploy)');
-  const enviada = await api.sendMessage({
-    chat_id: GRUPO_ID,
-    text: PEDIDOS[tipo](cartas, tiragem),
-    link_preview_options: { is_disabled: true },
-  });
-  await db.insert(leituras).values({
-    chatId,
-    tipo,
-    tiragem: tiragem || null,
-    cartas,
-    mensagemNoGrupo: enviada.message_id,
-    estado: 'aguardando',
-    criada: agora(),
-  }).run();
+  if (!GRUPO_ID) throw Object.assign(new Error('grupo da Mira não configurado neste deploy'), { semGrupo: true });
+  const enviada = await enviarAoGrupo(PEDIDOS[tipo](cartas, tiragem));
+  try {
+    await db.insert(leituras).values({
+      chatId,
+      tipo,
+      tiragem: tiragem || null,
+      cartas,
+      mensagemNoGrupo: enviada.message_id,
+      estado: 'aguardando',
+      criada: agora(),
+    }).run();
+  } catch (e) {
+    throw Object.assign(new Error('pedido enviado, mas não registrado'), { semRegistro: true, causa: e });
+  }
   console.log('pedido enviado à Mira', { tipo, mensagem: enviada.message_id, chatId });
 }
 
-export const ehMira = (mensagem) => (
-  mensagem.chat.id === GRUPO_ID
-  && !!mensagem.from
-  && String(mensagem.from.username || '').replace(/^@/, '').toLowerCase() === MIRA_USUARIO
-);
+export const detalheDaFalha = (e) => (e && (e.description || (e.causa && e.causa.message) || e.message)) || String(e);
+
+function motivoDaFalha(e) {
+  if (e && e.semGrupo) return 'O grupo da Mira não está configurado neste deploy.';
+  if (e instanceof BotApiError) {
+    if (e.code === 403) return 'O bot não tem acesso ao grupo da Mira.';
+    if (e.code === 429) {
+      const espera = e.parameters && e.parameters.retry_after;
+      return espera ? `O Telegram pediu para esperar ${espera} s.` : 'O Telegram pediu para esperar um pouco.';
+    }
+    if (e.code === 400) return 'O Telegram não aceitou o grupo configurado.';
+  }
+  return 'Erro inesperado ao falar com o grupo.';
+}
+
+export function avisoDaFalha(tipo, e) {
+  if (e && e.semRegistro) {
+    return `⚠️ O pedido da leitura ${ROTULOS[tipo]} foi enviado à Mira, mas não consegui registrá-lo; a resposta pode não ser repassada.`;
+  }
+  return `⚠️ Não consegui enviar o pedido da leitura ${ROTULOS[tipo]} à Mira. ${motivoDaFalha(e)}`;
+}
+
+export async function ehMira(mensagem) {
+  if (!mensagem.from) return false;
+  if (String(mensagem.from.username || '').replace(/^@/, '').toLowerCase() !== MIRA_USUARIO) return false;
+  return ehGrupo(mensagem.chat.id);
+}
 
 const textoDe = (mensagem) => String(mensagem.text || mensagem.caption || '').trim();
 
@@ -130,8 +165,8 @@ async function seguirDepoisDaPrimeiraParte(leitura) {
     try {
       await perguntar(leitura.chatId, 'preditiva', leitura.cartas, leitura.tiragem);
     } catch (e) {
-      console.error('pedido da leitura preditiva falhou:', (e && e.message) || String(e));
-      await api.sendMessage({ chat_id: leitura.chatId, text: '⚠️ Não consegui pedir a leitura preditiva à Mira.' });
+      console.error('pedido da leitura preditiva falhou:', detalheDaFalha(e));
+      await api.sendMessage({ chat_id: leitura.chatId, text: avisoDaFalha('preditiva', e) });
     }
     return;
   }
