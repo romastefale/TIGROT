@@ -3,7 +3,6 @@ import { and, asc, eq, gt, inArray, lt, sql } from 'sdk/db';
 import { leituras, partes } from '../schema.js';
 import { ESPERA_SEGUNDOS, LIMPEZA_SEGUNDOS, MIRA_PREFIXO, MIRA_USUARIO } from './config.js';
 import { GRUPO_ID } from './grupo.js';
-import { ehGrupo, grupoAtual, registrarMigracao } from './destino.js';
 import { posicao } from './cartas.js';
 import { agora } from './sessao.js';
 import { dividir, editarTexto, enviarTexto } from './texto.js';
@@ -42,21 +41,13 @@ const PEDIDOS = {
   ),
 };
 
-async function enviarAoGrupo(texto) {
-  const pedido = (chat_id) => ({ chat_id, text: texto, link_preview_options: { is_disabled: true } });
-  try {
-    return await api.sendMessage(pedido(await grupoAtual()));
-  } catch (e) {
-    const novoId = e instanceof BotApiError && e.parameters && e.parameters.migrate_to_chat_id;
-    if (!novoId) throw e;
-    await registrarMigracao(novoId);
-    return api.sendMessage(pedido(novoId));
-  }
-}
-
 export async function perguntar(chatId, tipo, cartas, tiragem) {
   if (!GRUPO_ID) throw Object.assign(new Error('grupo da Mira não configurado neste deploy'), { semGrupo: true });
-  const enviada = await enviarAoGrupo(PEDIDOS[tipo](cartas, tiragem));
+  const enviada = await api.sendMessage({
+    chat_id: GRUPO_ID,
+    text: PEDIDOS[tipo](cartas, tiragem),
+    link_preview_options: { is_disabled: true },
+  });
   try {
     await db.insert(leituras).values({
       chatId,
@@ -95,11 +86,12 @@ export function avisoDaFalha(tipo, e) {
   return `⚠️ Não consegui enviar o pedido da leitura ${ROTULOS[tipo]} à Mira. ${motivoDaFalha(e)}`;
 }
 
-export async function ehMira(mensagem) {
-  if (!mensagem.from) return false;
-  if (String(mensagem.from.username || '').replace(/^@/, '').toLowerCase() !== MIRA_USUARIO) return false;
-  return ehGrupo(mensagem.chat.id);
-}
+export const ehMira = (mensagem) => (
+  !!GRUPO_ID
+  && mensagem.chat.id === GRUPO_ID
+  && !!mensagem.from
+  && String(mensagem.from.username || '').replace(/^@/, '').toLowerCase() === MIRA_USUARIO
+);
 
 const textoDe = (mensagem) => String(mensagem.text || mensagem.caption || '').trim();
 

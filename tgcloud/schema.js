@@ -30,11 +30,6 @@ export const partes = table('partes', {
   leituraIdx: index('idx_partes_leitura').on(t.leituraId),
 }));
 
-export const ajustes = table('ajustes', {
-  chave: text('chave').primaryKey(),
-  valor: text('valor').notNull(),
-});
-
 export const fotos = table('fotos', {
   chave:   text('chave').primaryKey(),
   arquivo: text('arquivo').notNull(),

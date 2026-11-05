@@ -32,7 +32,7 @@ O bot só diz que pediu a leitura depois de o Telegram aceitar o pedido no grupo
 - outro erro: "Erro inesperado ao falar com o grupo.";
 - pedido aceito pelo Telegram, mas falha ao gravar no banco: o aviso diz que o pedido foi enviado e que a resposta pode não ser repassada.
 
-Se o Telegram informar que o grupo virou supergrupo (`migrate_to_chat_id`), o bot reenvia o pedido ao novo id e guarda a troca na tabela `ajustes`; a troca só vale enquanto o `GRUPO_ID` do deploy for o mesmo. Mensagens da @mira são aceitas só do grupo configurado (ou do novo id guardado).
+Se o grupo virar supergrupo, o id muda: o Telegram passa a recusar o antigo (erro 400) e o `GROUP` precisa ser atualizado com o novo id. O bot não troca isso sozinho.
 
 Não há como repetir um envio depois de uma espera, porque o serverless não tem temporizador. Por isso o bot não tenta de novo sozinho: avisa o usuário, que pode pedir a tiragem outra vez.
 
@@ -48,7 +48,7 @@ Não há como repetir um envio depois de uma espera, porque o serverless não te
 
 Não há variáveis de ambiente nem token no código: a Bot API é chamada pelo `api` do SDK. Os valores ficam em `tgcloud/lib/config.js`, e o id do grupo vem do secret `GROUP` do GitHub Actions (abaixo). O valor do `GROUP` nunca é impresso: o bot não o escreve em log nem em mensagem, e o workflow só o lê como secret (o Actions o mascara).
 
-- `GRUPO_ID`, em `tgcloud/lib/grupo.js`: grupo privado onde está a @mira. O arquivo guardado no repositório traz `0` (não configurado). A cada deploy o workflow lê o secret `GROUP`, tira espaços das pontas e exige um id negativo, com o sinal e sem zeros à esquerda (por exemplo `-1001234567890`); então reescreve o arquivo. Se o secret estiver vazio ou fora desse formato, o deploy para e informa só a causa (sem mostrar o valor), para não apagar o grupo que já estava publicado.
+- `GRUPO_ID`, em `tgcloud/lib/grupo.js`: grupo privado onde está a @mira. O arquivo guardado no repositório traz `0` (não configurado). A cada deploy o workflow lê o secret `GROUP`, tira espaços das pontas e grava o número sempre negativo: aceita com ou sem o `-` (id de grupo nunca é positivo) e de grupo comum ou supergrupo. O id precisa ser o que o Telegram mostra para o chat, com o prefixo `100` nos supergrupos. Se o secret estiver vazio ou tiver algo que não seja número, o deploy para e informa só a causa (sem mostrar o valor), para não apagar o grupo que já estava publicado.
 - `MIRA_PREFIXO` (`@mira`) e `MIRA_USUARIO` (`mira`, sem `@`, sem diferenciar maiúsculas).
 - `ESPERA_SEGUNDOS` (600), `SESSAO_SEGUNDOS` (1800), `LIMPEZA_SEGUNDOS` (86400, quando leituras antigas são apagadas).
 - `MAX_CARTAS` (12) e `CARTAS_POR_PAGINA` (8) na seleção manual.
@@ -57,7 +57,7 @@ Não há variáveis de ambiente nem token no código: a Bot API é chamada pelo 
 ## Montar (uma vez)
 
 1. No [@BotFather](https://t.me/BotFather): bot → **Serverless** → ligar. Em **CLI Access**, copie o *Access token* (`app<id>:<secret>`; não é o token da Bot API).
-2. No GitHub: Settings → Secrets and variables → Actions → secret **`TGCLOUD_TOKEN`** com esse valor, e secret **`GROUP`** com o id do grupo, com o sinal. Use secret, não variável: o Actions só mascara secrets nos logs, e este repositório é público.
+2. No GitHub: Settings → Secrets and variables → Actions → secret **`TGCLOUD_TOKEN`** com esse valor, e secret **`GROUP`** com o id do grupo (com ou sem o `-`). Use secret, não variável: o Actions só mascara secrets nos logs, e este repositório é público.
 3. O bot precisa ser admin do grupo privado onde está a @mira (assim recebe todas as mensagens do grupo) e a comunicação entre bots precisa estar ligada nos dois bots. Esses dois pontos são configuração do grupo e do BotFather, feita por você, e o código não consegue verificá-los.
 4. Merge na `main` (ou Actions → *Deploy* → Run workflow). O passo `push` imprime o endereço `https://app<id>.tgcloud.ai/`.
 5. Coloque esse endereço, terminado em `/cartas/`, em `URL_CARTAS` (`tgcloud/lib/config.js`) e faça o deploy de novo. Até lá o bot envia só o nome e a posição de cada carta.
@@ -79,7 +79,7 @@ npm run cartas
 
 ## Estrutura
 
-- `tgcloud/schema.js`: tabelas `sessoes`, `leituras`, `partes`, `ajustes` e `fotos`.
+- `tgcloud/schema.js`: tabelas `sessoes`, `leituras`, `partes` e `fotos`.
 - `tgcloud/handlers/`: `message`, `edited_message` e `callback_query`.
 - `tgcloud/lib/`: cartas e tiragens, teclados, comandos, callbacks, ponte com a @mira, fotos e formatação de texto.
 - `web/cartas/`: 156 imagens (78 cartas, normal e invertida), geradas por `scripts/cartas/gerar.mjs`.
