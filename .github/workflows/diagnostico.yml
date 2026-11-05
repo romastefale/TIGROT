@@ -106,6 +106,15 @@ jobs:
               grupo.botNoGrupo = membro.ok ? membro.valor.status : membro.erro;
               grupo.administradores = admins.ok ? { humanos: lista.length - bots.length, bots: bots.map((a) => a.user.username || '(sem usuário)') } : admins.erro;
               grupo.miraEntreOsAdministradores = lista.some((a) => a.user && String(a.user.username || '').toLowerCase() === MIRA_USUARIO);
+              const total = await tentar(() => api.getChatMemberCount({ chat_id: GRUPO_ID }));
+              grupo.totalDeMembros = total.ok ? total.valor : total.erro;
+              const mira = await tentar(() => api.getChat({ chat_id: `@${MIRA_USUARIO}` }));
+              grupo.mira = { usuarioEncontrado: mira.ok, resultado: mira.ok ? mira.valor.type : mira.erro };
+              if (mira.ok && mira.valor.id) {
+                const naMira = await tentar(() => api.getChatMember({ chat_id: GRUPO_ID, user_id: mira.valor.id }));
+                grupo.mira.statusNoGrupo = naMira.ok ? naMira.valor.status : naMira.erro;
+                grupo.mira.ehBot = naMira.ok ? Boolean(naMira.valor.user && naMira.valor.user.is_bot) : undefined;
+              }
             }
             return {
               bot: { usuario: eu.username, leTodasAsMensagensDeGrupo: eu.can_read_all_group_messages },
