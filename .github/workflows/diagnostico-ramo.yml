@@ -68,6 +68,27 @@ jobs:
         run: |
           npm run run -- handlers/edited_message '{ message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, text: "x" }'
 
+      - name: Registro de mensagens funciona na plataforma (linha de teste que se apaga)
+        continue-on-error: true
+        run: |
+          mkdir -p tgcloud/endpoints
+          cat > tgcloud/endpoints/testevisto.js <<'EOF'
+          import { db } from 'sdk';
+          import { eq } from 'sdk/db';
+          import { vistos } from '../schema.js';
+          import { GRUPO_ID } from '../lib/grupo.js';
+          import { registrarVisto } from '../lib/observacao.js';
+
+          export default async function () {
+            const antes = await db.$count(vistos);
+            await registrarVisto({ message_id: 1, chat: { id: GRUPO_ID }, from: { id: 1, is_bot: true, username: 'diagnostico_teste' }, text: 'x' }, 'teste');
+            const linha = await db.select().from(vistos).where(eq(vistos.usuario, 'diagnostico_teste')).get();
+            await db.delete(vistos).where(eq(vistos.usuario, 'diagnostico_teste')).run();
+            return { gravou: Boolean(linha), linhasAntes: antes };
+          }
+          EOF
+          npm run run -- endpoints/testevisto '{}' --ctx '{ initData: { user: { id: 1 } } }'
+
       - name: Estado das leituras e do bot no grupo (sem ids, títulos nem textos)
         run: |
           mkdir -p tgcloud/endpoints
