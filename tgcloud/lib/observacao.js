@@ -2,12 +2,12 @@ import { db } from 'sdk';
 import { sql } from 'sdk/db';
 import { vistos } from '../schema.js';
 import { GRUPO_ID } from './grupo.js';
-import { ehMira } from './ponte.js';
+import { ehMira, mesmoId } from './ponte.js';
 import { agora } from './sessao.js';
 
 export async function registrarVisto(mensagem, via) {
   try {
-    if (!GRUPO_ID || mensagem.chat.id !== GRUPO_ID) return;
+    if (!GRUPO_ID || !mesmoId(mensagem.chat.id, GRUPO_ID)) return;
     const bot = Boolean(mensagem.from && mensagem.from.is_bot);
     await db.insert(vistos).values({
       quando: agora(),

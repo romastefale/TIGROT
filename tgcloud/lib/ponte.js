@@ -50,7 +50,7 @@ export async function perguntar(chatId, tipo, cartas, tiragem) {
   });
   try {
     await db.insert(leituras).values({
-      chatId,
+      chatId: Number(chatId),
       tipo,
       tiragem: tiragem || null,
       cartas,
@@ -86,9 +86,11 @@ export function avisoDaFalha(tipo, e) {
   return `⚠️ Não consegui enviar o pedido da leitura ${ROTULOS[tipo]} à Mira. ${motivoDaFalha(e)}`;
 }
 
+export const mesmoId = (a, b) => a !== undefined && a !== null && b !== undefined && b !== null && String(a) === String(b);
+
 export const ehMira = (mensagem) => (
   !!GRUPO_ID
-  && mensagem.chat.id === GRUPO_ID
+  && mesmoId(mensagem.chat.id, GRUPO_ID)
   && !!mensagem.from
   && String(mensagem.from.username || '').replace(/^@/, '').toLowerCase() === MIRA_USUARIO
 );
@@ -104,7 +106,7 @@ async function leituraDaMensagem(mensagem) {
     .orderBy(asc(leituras.id))
     .all();
   const alvo = mensagem.reply_to_message && mensagem.reply_to_message.message_id;
-  const formal = abertas.find((l) => l.mensagemNoGrupo === alvo);
+  const formal = abertas.find((l) => mesmoId(l.mensagemNoGrupo, alvo));
   if (formal) return formal;
   const aguardando = abertas.filter((l) => l.estado === 'aguardando');
   if (aguardando.length === 1) return aguardando[0];
@@ -142,27 +144,27 @@ async function atualizarParte(parte, chatId, novoTexto) {
 async function entregarParte(leitura, mensagemDaMira, texto) {
   const ids = [];
   try {
-    for (const pedaco of dividir(texto)) ids.push((await enviarTexto(leitura.chatId, pedaco)).message_id);
+    for (const pedaco of dividir(texto)) ids.push((await enviarTexto(Number(leitura.chatId), pedaco)).message_id);
   } finally {
     await db.update(partes).set({ entregues: ids }).where(eq(partes.mensagemDaMira, mensagemDaMira)).run();
   }
   const atual = await db.select().from(partes).where(eq(partes.mensagemDaMira, mensagemDaMira)).get();
   if (atual && atual.texto !== texto) {
-    await atualizarParte({ ...atual, texto, entregues: ids }, leitura.chatId, atual.texto);
+    await atualizarParte({ ...atual, texto, entregues: ids }, Number(leitura.chatId), atual.texto);
   }
 }
 
 async function seguirDepoisDaPrimeiraParte(leitura) {
   if (leitura.tipo === 'tecnica') {
     try {
-      await perguntar(leitura.chatId, 'preditiva', leitura.cartas, leitura.tiragem);
+      await perguntar(Number(leitura.chatId), 'preditiva', leitura.cartas, leitura.tiragem);
     } catch (e) {
       console.error('pedido da leitura preditiva falhou:', detalheDaFalha(e));
-      await api.sendMessage({ chat_id: leitura.chatId, text: avisoDaFalha('preditiva', e) });
+      await api.sendMessage({ chat_id: Number(leitura.chatId), text: avisoDaFalha('preditiva', e) });
     }
     return;
   }
-  await api.sendMessage({ chat_id: leitura.chatId, text: '✨ Para uma nova leitura, use /ler ou /tirar.' });
+  await api.sendMessage({ chat_id: Number(leitura.chatId), text: '✨ Para uma nova leitura, use /ler ou /tirar.' });
 }
 
 export async function receberDaMira(mensagem) {
@@ -172,7 +174,7 @@ export async function receberDaMira(mensagem) {
   const existente = await db.select().from(partes).where(eq(partes.mensagemDaMira, mensagem.message_id)).get();
   if (existente) {
     const dona = await db.select().from(leituras).where(eq(leituras.id, existente.leituraId)).get();
-    if (dona) await atualizarParte(existente, dona.chatId, texto);
+    if (dona) await atualizarParte(existente, Number(dona.chatId), texto);
     return;
   }
 
@@ -193,7 +195,7 @@ export async function receberDaMira(mensagem) {
     .run();
   const primeira = Number(marcada.rowsAffected) === 1;
 
-  if (primeira) await api.sendMessage({ chat_id: leitura.chatId, text: CABECALHOS[leitura.tipo], parse_mode: 'HTML' });
+  if (primeira) await api.sendMessage({ chat_id: Number(leitura.chatId), text: CABECALHOS[leitura.tipo], parse_mode: 'HTML' });
   try {
     await entregarParte(leitura, mensagem.message_id, texto);
   } catch (e) {
