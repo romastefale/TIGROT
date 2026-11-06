@@ -5,7 +5,6 @@ import { ESPERA_SEGUNDOS, LIMPEZA_SEGUNDOS, MIRA_PREFIXO, MIRA_USUARIO } from '.
 import { GRUPO_ID } from './grupo.js';
 import { posicao } from './cartas.js';
 import { agora } from './sessao.js';
-import { dividir, editarTexto, enviarTexto } from './texto.js';
 
 const ROTULOS = { tecnica: 'técnica', preditiva: 'preditiva' };
 
@@ -95,7 +94,7 @@ export const ehMira = (mensagem) => (
   && String(mensagem.from.username || '').replace(/^@/, '').toLowerCase() === MIRA_USUARIO
 );
 
-const textoDe = (mensagem) => String(mensagem.text || mensagem.caption || '').trim();
+const textoDe = (mensagem) => String(mensagem.text || mensagem.caption || '');
 
 async function leituraDaMensagem(mensagem) {
   const abertas = await db.select().from(leituras)
@@ -114,44 +113,43 @@ async function leituraDaMensagem(mensagem) {
   return null;
 }
 
-async function apagarSilencioso(chat_id, message_id) {
+async function copiarParaOUsuario(mensagem, chat_id) {
   try {
-    await api.deleteMessage({ chat_id, message_id });
+    const copia = await api.copyMessage({
+      chat_id,
+      from_chat_id: Number(mensagem.chat.id),
+      message_id: Number(mensagem.message_id),
+    });
+    return Number(copia.message_id);
+  } catch (e) {
+    if (!(e instanceof BotApiError) || mensagem.text === undefined) throw e;
+    console.warn('copyMessage recusado, reenviando o texto com as mesmas entidades:', e.code, e.description);
+    const enviada = await api.sendMessage({ chat_id, text: mensagem.text, entities: mensagem.entities });
+    return Number(enviada.message_id);
+  }
+}
+
+async function atualizarParte(parte, chat_id, mensagem) {
+  const novo = textoDe(mensagem);
+  if (parte.texto === novo) return;
+  await db.update(partes).set({ texto: novo }).where(eq(partes.mensagemDaMira, parte.mensagemDaMira)).run();
+  const message_id = parte.entregues[0];
+  if (!message_id) return;
+  try {
+    if (mensagem.text !== undefined) {
+      await api.editMessageText({ chat_id, message_id, text: mensagem.text, entities: mensagem.entities });
+    } else if (mensagem.caption !== undefined) {
+      await api.editMessageCaption({ chat_id, message_id, caption: mensagem.caption, caption_entities: mensagem.caption_entities });
+    }
   } catch (e) {
     if (!(e instanceof BotApiError)) throw e;
-    console.warn('mensagem não apagada:', e.code, e.description);
+    console.warn('edição da cópia recusada:', e.code, e.description);
   }
 }
 
-async function atualizarParte(parte, chatId, novoTexto) {
-  if (parte.texto === novoTexto) return;
-  const antigos = dividir(parte.texto);
-  const novos = dividir(novoTexto);
-  await db.update(partes).set({ texto: novoTexto }).where(eq(partes.mensagemDaMira, parte.mensagemDaMira)).run();
-  const ids = [...parte.entregues];
-  if (!ids.length) return;
-  for (let i = 0; i < novos.length; i++) {
-    if (i >= ids.length) {
-      ids.push((await enviarTexto(chatId, novos[i])).message_id);
-    } else if (novos[i] !== antigos[i]) {
-      await editarTexto(chatId, ids[i], novos[i]);
-    }
-  }
-  while (ids.length > novos.length) await apagarSilencioso(chatId, ids.pop());
-  await db.update(partes).set({ entregues: ids }).where(eq(partes.mensagemDaMira, parte.mensagemDaMira)).run();
-}
-
-async function entregarParte(leitura, mensagemDaMira, texto) {
-  const ids = [];
-  try {
-    for (const pedaco of dividir(texto)) ids.push((await enviarTexto(Number(leitura.chatId), pedaco)).message_id);
-  } finally {
-    await db.update(partes).set({ entregues: ids }).where(eq(partes.mensagemDaMira, mensagemDaMira)).run();
-  }
-  const atual = await db.select().from(partes).where(eq(partes.mensagemDaMira, mensagemDaMira)).get();
-  if (atual && atual.texto !== texto) {
-    await atualizarParte({ ...atual, texto, entregues: ids }, Number(leitura.chatId), atual.texto);
-  }
+async function entregarParte(leitura, mensagem) {
+  const copia = await copiarParaOUsuario(mensagem, Number(leitura.chatId));
+  await db.update(partes).set({ entregues: [copia] }).where(eq(partes.mensagemDaMira, Number(mensagem.message_id))).run();
 }
 
 async function seguirDepoisDaPrimeiraParte(leitura) {
@@ -168,13 +166,10 @@ async function seguirDepoisDaPrimeiraParte(leitura) {
 }
 
 export async function receberDaMira(mensagem) {
-  const texto = textoDe(mensagem);
-  if (!texto) return;
-
-  const existente = await db.select().from(partes).where(eq(partes.mensagemDaMira, mensagem.message_id)).get();
+  const existente = await db.select().from(partes).where(eq(partes.mensagemDaMira, Number(mensagem.message_id))).get();
   if (existente) {
     const dona = await db.select().from(leituras).where(eq(leituras.id, existente.leituraId)).get();
-    if (dona) await atualizarParte(existente, Number(dona.chatId), texto);
+    if (dona) await atualizarParte(existente, Number(dona.chatId), mensagem);
     return;
   }
 
@@ -185,7 +180,7 @@ export async function receberDaMira(mensagem) {
   }
 
   const nova = await db.insert(partes)
-    .values({ mensagemDaMira: mensagem.message_id, leituraId: leitura.id, texto, entregues: [] })
+    .values({ mensagemDaMira: Number(mensagem.message_id), leituraId: leitura.id, texto: textoDe(mensagem), entregues: [] })
     .onConflictDoNothing()
     .run();
   if (Number(nova.rowsAffected) !== 1) return;
@@ -197,9 +192,10 @@ export async function receberDaMira(mensagem) {
 
   if (primeira) await api.sendMessage({ chat_id: Number(leitura.chatId), text: CABECALHOS[leitura.tipo], parse_mode: 'HTML' });
   try {
-    await entregarParte(leitura, mensagem.message_id, texto);
+    await entregarParte(leitura, mensagem);
   } catch (e) {
     console.error('entrega da leitura falhou:', (e && e.description) || (e && e.message) || String(e));
+    await api.sendMessage({ chat_id: Number(leitura.chatId), text: '⚠️ A resposta da Mira chegou, mas não consegui repassá-la.' });
   }
   if (primeira) await seguirDepoisDaPrimeiraParte(leitura);
 }
